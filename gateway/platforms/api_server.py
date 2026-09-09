@@ -67,7 +67,8 @@ _BROWSER_CONTROL_PROTOCOL_VERSION = 1
 _STATIC_FEATURE_FLAGS = {
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
-    "session_resources": True, "model_options": True, "session_chat": True,
+    "session_resources": True, "session_messages_include_compacted": True,
+    "model_options": True, "session_chat": True,
     "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
@@ -2908,8 +2909,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         resolved_id = await asyncio.to_thread(db.resolve_resume_session_id, session_id)
         raw_limit, raw_offset = request.query.get("limit"), request.query.get("offset", "0")
         order = request.query.get("order")
+        raw_include_compacted = request.query.get("include_compacted")
         if order not in (None, "oldest", "latest"):
             return _error_response("order must be one of: oldest, latest", 400, code="invalid_pagination")
+        if (
+            raw_include_compacted is not None
+            and raw_include_compacted.strip().lower()
+            not in (_TRUE_REQUEST_BOOL_STRINGS | _FALSE_REQUEST_BOOL_STRINGS)
+        ):
+            return _error_response(
+                "include_compacted must be a boolean", 400, code="invalid_session_query")
+        include_compacted = _coerce_request_bool(raw_include_compacted, default=False)
         try:
             offset = int(raw_offset)
             requested_limit = None if raw_limit is None else int(raw_limit)
@@ -2921,7 +2931,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         latest_page = order == "latest" or (order is None and default_page)
         limit = 500 if default_page else min(requested_limit, 500)
         messages = await asyncio.to_thread(
-            db.get_messages, resolved_id, limit=limit, offset=offset, latest=latest_page)
+            db.get_messages, resolved_id, limit=limit, offset=offset, latest=latest_page,
+            include_compacted=include_compacted)
         return web.json_response({
             "object": "list", "session_id": resolved_id,
             "data": [self._message_response(m) for m in messages],
