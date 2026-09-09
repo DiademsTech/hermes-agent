@@ -66,6 +66,7 @@ _BROWSER_CONTROL_PROTOCOL_VERSION = 1
 
 # /v1/capabilities static feature flags (order is part of the JSON shape).
 _STATIC_FEATURE_FLAGS = {
+    "session_messages_include_compacted": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
     "session_resources": True, "model_options": True, "session_chat": True,
@@ -3277,6 +3278,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         resolved_id = await asyncio.to_thread(db.resolve_resume_session_id, session_id)
         raw_limit, raw_offset = request.query.get("limit"), request.query.get("offset", "0")
         order = request.query.get("order")
+        raw_include_compacted = request.query.get("include_compacted")
+        if raw_include_compacted is not None and raw_include_compacted.strip().lower() not in (
+            _TRUE_REQUEST_BOOL_STRINGS | _FALSE_REQUEST_BOOL_STRINGS
+        ):
+            return _error_response("include_compacted must be a boolean", 400, code="invalid_session_query")
+        include_compacted = _coerce_request_bool(raw_include_compacted, default=False)
         if order not in (None, "oldest", "latest"):
             return _error_response("order must be one of: oldest, latest", 400, code="invalid_pagination")
         try:
@@ -3289,7 +3296,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         default_page = requested_limit is None
         latest_page = order == "latest" or (order is None and default_page)
         limit = 500 if default_page else min(requested_limit, 500)
-        include_compacted = _coerce_request_bool(request.query.get("include_compacted"), default=False)
         # Compression lineage: return root→tip messages, matching the REST router (#51058).
         messages = await asyncio.to_thread(
             db.get_messages, resolved_id, limit=limit, offset=offset, latest=latest_page,
