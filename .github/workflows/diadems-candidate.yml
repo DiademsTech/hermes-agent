@@ -60,7 +60,7 @@ jobs:
       - name: Run the Hermes gateway contracts
         working-directory: hermes
         run: |
-          uv sync --locked --python 3.11 --extra dev
+          uv sync --locked --python 3.11 --extra dev --extra messaging
           scripts/run_tests.sh tests/gateway/test_session_api.py tests/gateway/test_api_server_compaction_projection.py -q
 
       - name: Set up Docker Buildx
