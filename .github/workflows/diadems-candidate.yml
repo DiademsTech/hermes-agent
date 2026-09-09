@@ -1,0 +1,103 @@
+name: Diadems Hermes candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact reviewed Hermes release commit
+        required: true
+        default: af5833854d94a5fbb656a2eedfd35f0740732f99
+      upstream_commit:
+        description: Exact approved upstream tag commit
+        required: true
+        default: 29112bef099274229cadff79cdff7bf7b99c4b77
+      image_tag:
+        description: Candidate image tag (the digest remains authoritative)
+        required: true
+        default: v2026.8.31-diadems.1
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: diadems-hermes-candidate
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout the exact reviewed patchset
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.source_commit }}
+          fetch-depth: 0
+          path: hermes
+          persist-credentials: false
+
+      - name: Verify immutable source and branch composition
+        working-directory: hermes
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          UPSTREAM_COMMIT: ${{ inputs.upstream_commit }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$UPSTREAM_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+          git merge-base --is-ancestor "$UPSTREAM_COMMIT" HEAD
+          test "$(git rev-list "$UPSTREAM_COMMIT..HEAD")" = "$SOURCE_COMMIT"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: "0.9.28"
+
+      - name: Run the Hermes gateway contracts
+        working-directory: hermes
+        run: |
+          uv sync --locked --python 3.11 --extra dev
+          scripts/run_tests.sh tests/gateway/test_session_api.py tests/gateway/test_api_server_compaction_projection.py -q
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish the immutable candidate
+        id: image
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        with:
+          context: hermes
+          file: hermes/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/diademstech/hermes-agent:${{ inputs.image_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/DiademsTech/hermes-agent
+            org.opencontainers.image.revision=${{ inputs.source_commit }}
+            io.diadems.hermes.upstream.revision=${{ inputs.upstream_commit }}
+          build-args: |
+            HERMES_GIT_SHA=${{ inputs.source_commit }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=diadems-hermes-amd64
+          cache-to: type=gha,mode=max,scope=diadems-hermes-amd64
+
+      - name: Record candidate digest
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          echo "### Diadems Hermes candidate" >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/diademstech/hermes-agent:${IMAGE_TAG}@${IMAGE_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Pin this digest in the private Diadems manifest only after canary validation." >> "$GITHUB_STEP_SUMMARY"
