@@ -100,4 +100,4 @@ jobs:
         run: |
           echo "### Diadems Hermes candidate" >> "$GITHUB_STEP_SUMMARY"
           echo "ghcr.io/diademstech/hermes-agent:${IMAGE_TAG}@${IMAGE_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Pin this digest in the private Diadems manifest only after canary validation." >> "$GITHUB_STEP_SUMMARY"
+          echo "Record this candidate digest in the private Diadems manifest; approve it only after canary validation." >> "$GITHUB_STEP_SUMMARY"
