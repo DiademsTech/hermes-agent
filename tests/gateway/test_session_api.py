@@ -63,6 +63,7 @@ async def test_capabilities_advertises_session_control_surface(adapter):
 
     features = data["features"]
     assert features["session_resources"] is True
+    assert features["session_messages_include_compacted"] is True
     assert features["session_chat"] is True
     assert features["session_chat_streaming"] is True
     assert features["session_fork"] is True
@@ -114,6 +115,69 @@ async def test_session_messages_default_to_latest_bounded_page(adapter, session_
         "msg 1",
         "msg 2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_messages_can_include_compacted_display_history(adapter, session_db):
+    session_id = session_db.create_session("compacted-messages", "api_server")
+    session_db.append_messages_batch(
+        session_id,
+        [
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ],
+    )
+    session_db.archive_and_compact(
+        session_id,
+        [
+            {"role": "assistant", "content": "summary"},
+            {"role": "user", "content": "live question"},
+            {"role": "assistant", "content": "live answer"},
+        ],
+    )
+
+    app = _create_session_app(adapter)
+    async with TestClient(TestServer(app)) as cli:
+        default_resp = await cli.get(f"/api/sessions/{session_id}/messages?limit=10")
+        assert default_resp.status == 200
+        default_payload = await default_resp.json()
+        full_resp = await cli.get(
+            f"/api/sessions/{session_id}/messages"
+            "?include_compacted=true&limit=2&offset=1&order=latest"
+        )
+        assert full_resp.status == 200
+        full_payload = await full_resp.json()
+
+    assert [message["content"] for message in default_payload["data"]] == [
+        "summary",
+        "live question",
+        "live answer",
+    ]
+    assert [message["content"] for message in full_payload["data"]] == [
+        "summary",
+        "live question",
+    ]
+    assert full_payload["pagination"] == {
+        "limit": 2,
+        "offset": 1,
+        "order": "latest",
+        "returned": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_session_messages_rejects_invalid_include_compacted(adapter, session_db):
+    session_id = session_db.create_session("invalid-compacted-query", "api_server")
+    app = _create_session_app(adapter)
+
+    async with TestClient(TestServer(app)) as cli:
+        resp = await cli.get(
+            f"/api/sessions/{session_id}/messages?include_compacted=sometimes"
+        )
+        assert resp.status == 400
+        payload = await resp.json()
+
+    assert payload["error"]["code"] == "invalid_session_query"
 
 
 @pytest.mark.asyncio

@@ -3356,6 +3356,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "tool_progress_events": True,
                 "approval_events": True,
                 "session_resources": True,
+                "session_messages_include_compacted": True,
                 "model_options": True,
                 "session_chat": True,
                 "session_chat_streaming": True,
@@ -4509,6 +4510,7 @@ class APIServerAdapter(BasePlatformAdapter):
         raw_limit = request.query.get("limit")
         raw_offset = request.query.get("offset", "0")
         order = request.query.get("order")
+        raw_include_compacted = request.query.get("include_compacted")
         if order not in (None, "oldest", "latest"):
             return web.json_response(
                 _openai_error(
@@ -4517,6 +4519,19 @@ class APIServerAdapter(BasePlatformAdapter):
                 ),
                 status=400,
             )
+        if (
+            raw_include_compacted is not None
+            and raw_include_compacted.strip().lower()
+            not in (_TRUE_REQUEST_BOOL_STRINGS | _FALSE_REQUEST_BOOL_STRINGS)
+        ):
+            return web.json_response(
+                _openai_error(
+                    "include_compacted must be a boolean",
+                    code="invalid_session_query",
+                ),
+                status=400,
+            )
+        include_compacted = _coerce_request_bool(raw_include_compacted, default=False)
         try:
             offset = int(raw_offset)
             requested_limit = None if raw_limit is None else int(raw_limit)
@@ -4541,6 +4556,7 @@ class APIServerAdapter(BasePlatformAdapter):
             limit=limit,
             offset=offset,
             latest=latest_page,
+            include_compacted=include_compacted,
         )
         return web.json_response({
             "object": "list",
