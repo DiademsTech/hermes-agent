@@ -390,6 +390,67 @@ class TestRunEvents:
                 assert "run.completed" in body
                 assert "Hello!" in body
 
+    @pytest.mark.asyncio
+    async def test_events_stream_surfaces_interim_assistant_messages(self, adapter):
+        app = _create_runs_app(adapter)
+
+        def _create_agent(**kwargs):
+            interim_cb = kwargs["interim_assistant_callback"]
+            mock_agent = MagicMock()
+
+            def _run(**_run_kwargs):
+                interim_cb("Je vérifie les fichiers.", already_streamed=True)
+                return {"final_response": "Terminé."}
+
+            mock_agent.run_conversation.side_effect = _run
+            mock_agent.session_prompt_tokens = 0
+            mock_agent.session_completion_tokens = 0
+            mock_agent.session_total_tokens = 0
+            return mock_agent
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent", side_effect=_create_agent):
+                resp = await cli.post("/v1/runs", json={"input": "inspecte"})
+                run_id = (await resp.json())["run_id"]
+                events_resp = await cli.get(f"/v1/runs/{run_id}/events")
+                body = await events_resp.text()
+
+        assert '"event": "message.interim"' in body
+        assert '"text": "Je v\\u00e9rifie les fichiers."' in body
+        assert '"already_streamed": true' in body
+
+    @pytest.mark.asyncio
+    async def test_events_stream_honors_disabled_api_server_interim_messages(
+        self, adapter, monkeypatch
+    ):
+        app = _create_runs_app(adapter)
+        monkeypatch.setattr(
+            "gateway.run._load_gateway_config",
+            lambda: {
+                "display": {
+                    "platforms": {
+                        "api_server": {"interim_assistant_messages": False}
+                    }
+                }
+            },
+        )
+
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_create_agent") as create:
+                mock_agent = MagicMock()
+                mock_agent.run_conversation.return_value = {"final_response": "Terminé."}
+                mock_agent.session_prompt_tokens = 0
+                mock_agent.session_completion_tokens = 0
+                mock_agent.session_total_tokens = 0
+                create.return_value = mock_agent
+
+                resp = await cli.post("/v1/runs", json={"input": "inspecte"})
+                run_id = (await resp.json())["run_id"]
+                events_resp = await cli.get(f"/v1/runs/{run_id}/events")
+                await events_resp.text()
+
+        assert create.call_args.kwargs["interim_assistant_callback"] is None
+
 
     @pytest.mark.asyncio
     async def test_approval_resolve_all_is_scoped_to_target_run(self, auth_adapter):

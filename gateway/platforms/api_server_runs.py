@@ -598,6 +598,22 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         with suppress(Exception):
             loop.call_soon_threadsafe(run.put_event, _run_event(run_id, "message.delta", delta=delta))
 
+    def _interim_cb(text: str, *, already_streamed: bool = False) -> None:
+        """Publish safe assistant commentary produced between tool calls."""
+        value = str(text or "")
+        if not value.strip() or run_id not in self._run_streams:
+            return
+        with suppress(Exception):
+            loop.call_soon_threadsafe(
+                run.put_event,
+                _run_event(
+                    run_id,
+                    "message.interim",
+                    text=value,
+                    already_streamed=bool(already_streamed),
+                ),
+            )
+
     def _finish(status: str, extra: Optional[dict] = None, **fields: Any) -> None:
         """Terminal status, then best-effort ``run.<status>`` event; key order is wire shape."""
         extra = extra or {}
@@ -611,8 +627,23 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             _finish("cancelled")
             return
         with self._profile_scope(run.request_profile):
+            from gateway.display_config import resolve_display_setting
+            from gateway.run import _load_gateway_config
+
+            interim_cb = (
+                _interim_cb
+                if resolve_display_setting(
+                    _load_gateway_config(),
+                    "api_server",
+                    "interim_assistant_messages",
+                    True,
+                )
+                else None
+            )
             agent = self._create_agent(
-                stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
+                stream_delta_callback=_text_cb,
+                interim_assistant_callback=interim_cb,
+                tool_progress_callback=self._make_run_event_callback(run_id, loop),
                 **run.agent_kwargs)
         self._active_run_agents[run_id] = agent
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
