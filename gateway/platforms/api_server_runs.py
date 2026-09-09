@@ -642,6 +642,22 @@ async def _handle_runs(
         except Exception:
             pass
 
+    def _interim_cb(text: str, *, already_streamed: bool = False) -> None:
+        """Publish safe assistant commentary produced between tool calls."""
+        value = str(text or "")
+        if not value.strip() or run_id not in self._run_streams:
+            return
+        try:
+            loop.call_soon_threadsafe(_put_event_if_active, {
+                "event": "message.interim",
+                "run_id": run_id,
+                "timestamp": time.time(),
+                "text": value,
+                "already_streamed": bool(already_streamed),
+            })
+        except Exception:
+            pass
+
     initial_status = self._set_run_status(
         run_id,
         "queued",
@@ -717,10 +733,24 @@ async def _handle_runs(
                 )
                 return
             with self._profile_scope(request_profile):
+                from gateway.display_config import resolve_display_setting
+                from gateway.run import _load_gateway_config
+
+                interim_cb = (
+                    _interim_cb
+                    if resolve_display_setting(
+                        _load_gateway_config(),
+                        "api_server",
+                        "interim_assistant_messages",
+                        True,
+                    )
+                    else None
+                )
                 agent = self._create_agent(
                     ephemeral_system_prompt=ephemeral_system_prompt,
                     session_id=session_id,
                     stream_delta_callback=_text_cb,
+                    interim_assistant_callback=interim_cb,
                     tool_progress_callback=event_cb,
                     gateway_session_key=gateway_session_key,
                     requested_model=agent_overrides.get("requested_model"),
