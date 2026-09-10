@@ -1,5 +1,5 @@
 diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
-index 6b519cf4b2c..f96316543cb 100644
+index 6b519cf4b2c..b3d8dec5206 100644
 --- a/gateway/platforms/api_server.py
 +++ b/gateway/platforms/api_server.py
 @@ -3354,6 +3354,7 @@ class APIServerAdapter(BasePlatformAdapter):
@@ -10,7 +10,28 @@ index 6b519cf4b2c..f96316543cb 100644
                  "run_approval_response": True,
                  "tool_progress_events": True,
                  "approval_events": True,
-@@ -7208,6 +7209,9 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -4496,7 +4497,19 @@ class APIServerAdapter(BasePlatformAdapter):
+         if err:
+             return err
+         db = await self._ensure_session_db_async()
+-        deleted = await asyncio.to_thread(db.delete_session, session_id)
++        lane = (str(_api_request_profile.get() or ""), session_id)
++        if self._run_idempotency_store.queue_inputs(self._run_idempotency_scope(request), session_id) or any(
++            self._run_lanes.get(rid) == lane for rid in self._queue_mode_run_ids
++        ):
++            return web.json_response(_openai_error(
++                "Remove queued messages and finish active work before deleting the session",
++                code="session_busy",
++            ), status=409)
++        self._deleting_run_sessions.add(lane)
++        try:
++            deleted = await asyncio.to_thread(db.delete_session, session_id)
++        finally:
++            self._deleting_run_sessions.discard(lane)
+         return web.json_response({"object": "hermes.session.deleted", "id": session_id, "deleted": bool(deleted)})
+ 
+     async def _handle_session_messages(self, request: "web.Request") -> "web.Response":
+@@ -7208,6 +7221,9 @@ class APIServerAdapter(BasePlatformAdapter):
          if limit <= 0:
              return None
          inflight = self.active_agent_work_count()
@@ -20,7 +41,7 @@ index 6b519cf4b2c..f96316543cb 100644
          # The current request owns one reservation until it hands off to
          # _run_agent() or /v1/runs task registration. It must not consume its
          # own last available slot; other admitted requests remain counted.
-@@ -7656,6 +7660,12 @@ class APIServerAdapter(BasePlatformAdapter):
+@@ -7656,6 +7672,12 @@ class APIServerAdapter(BasePlatformAdapter):
              _api_server=sys.modules[__name__],
          )
  
@@ -112,22 +133,23 @@ index 4e4e8ce2b77..d416f13bc11 100644
                  )
  
 diff --git a/gateway/platforms/api_server_runs.py b/gateway/platforms/api_server_runs.py
-index 46d182db835..a256ccfd958 100644
+index 46d182db835..00e63f478d8 100644
 --- a/gateway/platforms/api_server_runs.py
 +++ b/gateway/platforms/api_server_runs.py
-@@ -71,6 +71,11 @@ def _initialize_run_state(self, *, store_factory) -> None:
+@@ -71,6 +71,12 @@ def _initialize_run_state(self, *, store_factory) -> None:
      # Active run agent/task references for stop support
      self._active_run_agents: Dict[str, Any] = {}
      self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
 +    # Per-profile/session FIFO admission. Request bodies remain process-local;
 +    # the durable idempotency store continues to contain only status/handles.
 +    self._run_lanes: Dict[str, tuple[str, str]] = {}
++    self._deleting_run_sessions: set[tuple[str, str]] = set()
 +    self._queued_run_inputs: Dict[str, str] = {}
 +    self._queue_mode_run_ids: set[str] = set()
      # Stop is cooperative: the executor thread may outlive the HTTP request.
      self._stopping_run_ids: set[str] = set()
      # Pollable run status for dashboards and external control-plane UIs.
-@@ -83,6 +88,8 @@ def _initialize_run_state(self, *, store_factory) -> None:
+@@ -83,6 +89,8 @@ def _initialize_run_state(self, *, store_factory) -> None:
  def _http_routes(self) -> list[tuple[str, str, Any]]:
      return [
          ("POST", "/v1/runs", self._handle_runs),
@@ -136,7 +158,7 @@ index 46d182db835..a256ccfd958 100644
          ("GET", "/v1/runs/{run_id}", self._handle_get_run),
          ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
          ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
-@@ -544,6 +551,22 @@ async def _handle_runs(
+@@ -544,6 +552,22 @@ async def _handle_runs(
                  conversation_history.append({"role": msg["role"], "content": str(content)})
  
      session_id = body.get("session_id") or stored_session_id
@@ -159,12 +181,14 @@ index 46d182db835..a256ccfd958 100644
      route = self._resolve_route(body.get("model"))
      agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
      selection_error = self._request_route_conflict_error(
-@@ -593,11 +616,29 @@ async def _handle_runs(
+@@ -593,11 +617,31 @@ async def _handle_runs(
              )
  
      # Enforce concurrency only for a genuinely new run.
 -    limited = self._concurrency_limited_response()
 +    lane = (str(_api_request_profile.get() or ""), str(session_id or ""))
++    if lane in self._deleting_run_sessions:
++        return web.json_response(_openai_error("Session is being deleted", code="session_busy"), status=409)
 +    predecessors = [
 +        task for rid, task in self._active_run_tasks.items()
 +        if not task.done() and self._run_lanes.get(rid) == lane
@@ -191,7 +215,7 @@ index 46d182db835..a256ccfd958 100644
          conversation_history = await self._conversation_history_for_session(
              str(session_id)
          )
-@@ -675,6 +716,7 @@ async def _handle_runs(
+@@ -675,6 +719,7 @@ async def _handle_runs(
              owner_pid=self._run_owner_pid,
              owner_started=self._run_owner_started,
              retention_until=_room_retention_until(request),
@@ -199,7 +223,7 @@ index 46d182db835..a256ccfd958 100644
          )
          if outcome != "created":
              self._run_streams.pop(run_id, None)
-@@ -718,7 +760,27 @@ async def _handle_runs(
+@@ -718,7 +763,27 @@ async def _handle_runs(
      )
  
      async def _run_and_close():
@@ -227,7 +251,82 @@ index 46d182db835..a256ccfd958 100644
              self._set_run_status(run_id, "running")
              if run_id in self._stopping_run_ids:
                  _put_event_if_active({
-@@ -847,6 +909,8 @@ async def _handle_runs(
+@@ -732,35 +797,47 @@ async def _handle_runs(
+                     last_event="run.cancelled",
+                 )
+                 return
+-            with self._profile_scope(request_profile):
+-                from gateway.display_config import resolve_display_setting
+-                from gateway.run import _load_gateway_config
+-
+-                interim_cb = (
+-                    _interim_cb
+-                    if resolve_display_setting(
+-                        _load_gateway_config(),
+-                        "api_server",
+-                        "interim_assistant_messages",
+-                        True,
++            def _construct_agent():
++                with self._profile_scope(request_profile):
++                    from gateway.display_config import resolve_display_setting
++                    from gateway.run import _load_gateway_config
++
++                    interim_cb = (
++                        _interim_cb
++                        if resolve_display_setting(
++                            _load_gateway_config(),
++                            "api_server",
++                            "interim_assistant_messages",
++                            True,
++                        )
++                        else None
+                     )
+-                    else None
+-                )
+-                agent = self._create_agent(
+-                    ephemeral_system_prompt=ephemeral_system_prompt,
+-                    session_id=session_id,
+-                    stream_delta_callback=_text_cb,
+-                    interim_assistant_callback=interim_cb,
+-                    tool_progress_callback=event_cb,
+-                    gateway_session_key=gateway_session_key,
+-                    requested_model=agent_overrides.get("requested_model"),
+-                    requested_provider=agent_overrides.get("requested_provider"),
+-                    model_options=agent_overrides.get("model_options"),
+-                    route=route,
+-                    room_dispatch=room_dispatch,
+-                    room_execution_policy=room_execution_policy,
+-                )
++                    return self._create_agent(
++                        ephemeral_system_prompt=ephemeral_system_prompt,
++                        session_id=session_id,
++                        stream_delta_callback=_text_cb,
++                        interim_assistant_callback=interim_cb,
++                        tool_progress_callback=event_cb,
++                        gateway_session_key=gateway_session_key,
++                        requested_model=agent_overrides.get("requested_model"),
++                        requested_provider=agent_overrides.get("requested_provider"),
++                        model_options=agent_overrides.get("model_options"),
++                        route=route,
++                        room_dispatch=room_dispatch,
++                        room_execution_policy=room_execution_policy,
++                    )
++            # Native initialization can perform provider/memory I/O. Keep the
++            # HTTP event loop available to admit, list and cancel follow-ups.
++            construction = asyncio.create_task(asyncio.to_thread(_construct_agent))
++            try:
++                agent = await asyncio.shield(construction)
++            except asyncio.CancelledError:
++                with suppress(Exception):
++                    await asyncio.shield(construction)
++                raise
+             self._active_run_agents[run_id] = agent
++            if run_id in self._stopping_run_ids:
++                raise asyncio.CancelledError
+ 
+             def _approval_notify(approval_data: Dict[str, Any]) -> None:
+                 event = dict(approval_data or {})
+@@ -847,6 +924,8 @@ async def _handle_runs(
                          # ownership so stop/cancel can reap only the
                          # background processes this run created (#76115).
                          _publish_turn_process_ownership(agent, effective_task_id)
@@ -236,7 +335,7 @@ index 46d182db835..a256ccfd958 100644
                          r = agent.run_conversation(
                              user_message=user_message,
                              conversation_history=conversation_history,
-@@ -888,7 +952,16 @@ async def _handle_runs(
+@@ -888,7 +967,16 @@ async def _handle_runs(
                      }
                      return r, u
  
@@ -254,7 +353,7 @@ index 46d182db835..a256ccfd958 100644
              if (
                  run_id in self._stopping_run_ids
                  and isinstance(result, dict)
-@@ -946,6 +1019,7 @@ async def _handle_runs(
+@@ -946,6 +1034,7 @@ async def _handle_runs(
                      **({"pending_steer": pending_steer} if pending_steer else {}),
                  )
          except asyncio.CancelledError:
@@ -262,7 +361,7 @@ index 46d182db835..a256ccfd958 100644
              self._set_run_status(
                  run_id,
                  "cancelled",
-@@ -1021,12 +1095,19 @@ async def _handle_runs(
+@@ -1021,12 +1110,19 @@ async def _handle_runs(
                  pass
              self._active_run_agents.pop(run_id, None)
              self._active_run_tasks.pop(run_id, None)
@@ -282,7 +381,7 @@ index 46d182db835..a256ccfd958 100644
      try:
          self._background_tasks.add(task)
      except TypeError:
-@@ -1038,7 +1119,7 @@ async def _handle_runs(
+@@ -1038,7 +1134,7 @@ async def _handle_runs(
          {"X-Hermes-Session-Key": gateway_session_key} if gateway_session_key else {}
      )
      return web.json_response(
@@ -291,7 +390,7 @@ index 46d182db835..a256ccfd958 100644
          status=202,
          headers=response_headers,
      )
-@@ -1065,6 +1146,59 @@ def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
+@@ -1065,6 +1161,59 @@ def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
      )
  
  
@@ -351,7 +450,7 @@ index 46d182db835..a256ccfd958 100644
  async def _handle_get_run(
      self,
      request: "web.Request",
-@@ -1096,7 +1230,11 @@ async def _handle_get_run(
+@@ -1096,7 +1245,11 @@ async def _handle_get_run(
              _openai_error(f"Run not found: {run_id}", code="run_not_found"),
              status=404,
          )
@@ -364,7 +463,7 @@ index 46d182db835..a256ccfd958 100644
  
  
  async def _handle_run_events(
-@@ -1435,6 +1573,9 @@ async def _handle_stop_run(
+@@ -1435,6 +1588,9 @@ async def _handle_stop_run(
      self._set_run_status(run_id, "stopping", last_event="run.stopping")
      self._stopping_run_ids.add(run_id)
  
@@ -376,10 +475,10 @@ index 46d182db835..a256ccfd958 100644
              request_hard_interrupt(agent, "Stop requested via API")
 diff --git a/tests/gateway/test_api_server_run_queue.py b/tests/gateway/test_api_server_run_queue.py
 new file mode 100644
-index 00000000000..1e06eec7515
+index 00000000000..feaddaa3269
 --- /dev/null
 +++ b/tests/gateway/test_api_server_run_queue.py
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,171 @@
 +"""FIFO API contracts without a model/provider or a live user session."""
 +import asyncio
 +import threading
@@ -518,6 +617,70 @@ index 00000000000..1e06eec7515
 +        assert (await client.delete('/v1/runs/run_pending/queue', headers=headers)).status == 200
 +        data = await (await client.get('/v1/runs?session_id=one', headers=headers)).json()
 +        assert data['runs'] == []
++
++
++@pytest.mark.asyncio
++async def test_slow_initialization_does_not_block_queue_http(tmp_path):
++    adapter = _make_adapter()
++    adapter._run_idempotency_store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
++    started, release, finished = threading.Event(), threading.Event(), threading.Event()
++    def create(**kwargs):
++        started.set()
++        release.wait(5)
++        finished.set()
++        agent = MagicMock()
++        agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
++        agent.run_conversation.return_value = {'final_response': 'done'}
++        return agent
++    async with TestClient(TestServer(app_for(adapter))) as client:
++        with patch.object(adapter, '_create_agent', side_effect=create), patch.object(
++            adapter, '_conversation_history_for_session', AsyncMock(return_value=[])
++        ):
++            try:
++                first = await (await client.post('/v1/runs', json={'input':'first','session_id':'one'})).json()
++                assert await asyncio.to_thread(started.wait, 3)
++                assert not finished.is_set(), 'HTTP admission waited for constructor I/O'
++                queued = await client.post('/v1/runs', json={'input':'second','session_id':'one','queue':True}, headers={'Idempotency-Key':'second'})
++                assert queued.status == 202
++                snapshot = await (await client.get('/v1/runs?session_id=one')).json()
++                assert any(item.get('queued_input') == 'second' for item in snapshot['runs'])
++                rid = (await queued.json())['run_id']
++                assert (await client.delete('/v1/runs/'+rid+'/queue')).status == 200
++                assert not finished.is_set(), 'Queue controls blocked on constructor I/O'
++            finally:
++                release.set()
++            await settled(adapter, first['run_id'])
+diff --git a/tests/gateway/test_api_server_runs.py b/tests/gateway/test_api_server_runs.py
+index 98362b2019f..96d3f004e53 100644
+--- a/tests/gateway/test_api_server_runs.py
++++ b/tests/gateway/test_api_server_runs.py
+@@ -614,7 +614,7 @@ class TestSteerRun:
+ 
+                 start_resp = await cli.post("/v1/runs", json={"input": "hello"})
+                 run_id = (await start_resp.json())["run_id"]
+-                assert run_started.wait(timeout=3.0)
++                assert await asyncio.to_thread(run_started.wait, 3.0)
+ 
+                 stop_resp = await cli.post(f"/v1/runs/{run_id}/stop")
+                 assert stop_resp.status == 200
+@@ -696,7 +696,7 @@ class TestRunLifecycleSweep:
+                 start_resp = await cli.post("/v1/runs", json={"input": "hello"})
+                 assert start_resp.status == 202
+                 run_id = (await start_resp.json())["run_id"]
+-                assert agent_ready.wait(timeout=3.0)
++                assert await asyncio.to_thread(agent_ready.wait, 3.0)
+ 
+                 task = adapter._active_run_tasks[run_id]
+                 assert isinstance(task, asyncio.Task)
+@@ -777,7 +777,7 @@ class TestStopRun:
+ 
+                 resp = await cli.post("/v1/runs", json={"input": "hello"})
+                 run_id = (await resp.json())["run_id"]
+-                assert started.wait(timeout=3)
++                assert await asyncio.to_thread(started.wait, 3)
+ 
+                 stop_resp = await cli.post(f"/v1/runs/{run_id}/stop")
+                 assert stop_resp.status == 200
 diff --git a/website/docs/user-guide/features/api-server.md b/website/docs/user-guide/features/api-server.md
 index 47c03736139..6fb67083341 100644
 --- a/website/docs/user-guide/features/api-server.md
