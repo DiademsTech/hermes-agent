@@ -1,0 +1,497 @@
+From 3085bfae17ebc646c4f3baf50155768dccfa3038 Mon Sep 17 00:00:00 2001
+From: Diadems Tech <194491654+DiademsTech@users.noreply.github.com>
+Date: Thu, 10 Sep 2026 09:32:19 +0200
+Subject: [PATCH] feat(memory): scope automatic Hindsight retention to each
+ automation
+
+---
+ agent/agent_init.py                           |  2 +
+ cron/jobs.py                                  |  6 ++
+ cron/scheduler.py                             |  1 +
+ gateway/platforms/api_server.py               |  1 +
+ gateway/platforms/webhook.py                  |  1 +
+ gateway/run.py                                |  4 ++
+ gateway/session.py                            |  4 ++
+ hermes_cli/cron.py                            |  2 +
+ hermes_cli/subcommands/cron.py                |  4 ++
+ hermes_cli/subcommands/webhook.py             |  3 +
+ hermes_cli/webhook.py                         |  5 ++
+ plugins/memory/hindsight/__init__.py          |  7 +-
+ run_agent.py                                  |  2 +
+ tests/cron/test_automation_memory_policy.py   | 64 +++++++++++++++++++
+ tests/gateway/test_webhook_adapter.py         | 26 ++++++++
+ tests/hermes_cli/test_webhook_cli.py          | 10 ++-
+ .../plugins/memory/test_hindsight_provider.py | 17 +++++
+ tools/cronjob_tools.py                        |  6 ++
+ 18 files changed, 163 insertions(+), 2 deletions(-)
+ create mode 100644 tests/cron/test_automation_memory_policy.py
+
+diff --git a/agent/agent_init.py b/agent/agent_init.py
+index 4fbf15e77b7..2c02dda5f8b 100644
+--- a/agent/agent_init.py
++++ b/agent/agent_init.py
+@@ -600,6 +600,7 @@ def init_agent(
+     skip_context_files: bool = False,
+     load_soul_identity: bool = False,
+     skip_memory: bool = False,
++    memory_auto_retain: bool = True,
+     skip_background_review: bool = False,
+     session_db=None,
+     parent_session_id: str = None,
+@@ -1929,6 +1930,7 @@ def init_agent(
+                         "platform": platform or "cli",
+                         "hermes_home": str(get_hermes_home()),
+                         "agent_context": "primary",
++                        "auto_retain": memory_auto_retain is True,
+                     }
+                     if _init_kwargs["platform"] == "cli":
+                         _init_kwargs["warning_callback"] = agent._emit_warning
+diff --git a/cron/jobs.py b/cron/jobs.py
+index 4306fe8f5d8..6d78c0a5c11 100644
+--- a/cron/jobs.py
++++ b/cron/jobs.py
+@@ -2225,6 +2225,7 @@ def create_job(
+     monitor_script: Optional[str] = None,
+     monitor_url: Optional[str] = None,
+     reasoning_effort: Optional[str] = None,
++    memory_auto_retain: bool = False,
+ ) -> Dict[str, Any]:
+     """
+     Create a new cron job.
+@@ -2296,6 +2297,8 @@ def create_job(
+     Returns:
+         The created job dict
+     """
++    if type(memory_auto_retain) is not bool:
++        raise ValueError("memory_auto_retain must be a boolean")
+     parsed_schedule = parse_schedule(schedule)
+ 
+     # Normalize repeat: treat 0 or negative values as None (infinite).
+@@ -2410,6 +2413,7 @@ def create_job(
+         # Hash-suppression state for monitor jobs: {"last_output_hash": ...,
+         # "last_changed_at": ...}. None until the first monitor tick.
+         "monitor_state": None,
++        "memory_auto_retain": memory_auto_retain is True,
+         "context_from": context_from,
+         "schedule": parsed_schedule,
+         "schedule_display": parsed_schedule.get("display", schedule),
+@@ -2521,6 +2525,8 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
+     # path component under OUTPUT_DIR — letting an update change it leaks
+     # path-escape values into output writes/deletes.
+     bad_fields = _IMMUTABLE_JOB_FIELDS.intersection(updates or {})
++    if "memory_auto_retain" in updates and type(updates["memory_auto_retain"]) is not bool:
++        raise ValueError("memory_auto_retain must be a boolean")
+     if bad_fields:
+         raise ValueError(
+             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index 6580427a6e2..77f30bf0999 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -6458,6 +6458,7 @@ def run_job(
+             # tool follows normal toolset resolution, so jobs benefit from
+             # (and can update) the user's persistent memory.
+             skip_memory=False,
++            memory_auto_retain=job.get("memory_auto_retain", False) is True,
+             skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
+             platform="cron",
+             session_id=_cron_session_id,
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index db3846ef1c8..6b519cf4b2c 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -3359,6 +3359,7 @@ class APIServerAdapter(BasePlatformAdapter):
+                 "approval_events": True,
+                 "session_resources": True,
+                 "session_messages_include_compacted": True,
++                "automation_memory_auto_retain": True,
+                 "model_options": True,
+                 "session_chat": True,
+                 "session_chat_streaming": True,
+diff --git a/gateway/platforms/webhook.py b/gateway/platforms/webhook.py
+index 1ff741f1e25..bc344891194 100644
+--- a/gateway/platforms/webhook.py
++++ b/gateway/platforms/webhook.py
+@@ -949,6 +949,7 @@ class WebhookAdapter(BasePlatformAdapter):
+         )
+         if profile and isinstance(profile, str):
+             source.profile = profile
++        source.memory_auto_retain = route_config.get("memory_auto_retain", False) is True
+         event = MessageEvent(
+             text=prompt,
+             message_type=MessageType.TEXT,
+diff --git a/gateway/run.py b/gateway/run.py
+index 8264eedc476..377d154392c 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -5981,6 +5981,8 @@ class TurnRunner:
+             user_id_alt=getattr(ctx.source, "user_id_alt", None),
+             skip_context_files=skip_context_files,
+         )
++        # A reused instance must not retain the previous execution's policy.
++        _sig = (_sig, getattr(ctx.source, "memory_auto_retain", True) is True)
+         agent = None
+         reused_cached_agent = False
+         _cache_lock = getattr(self._runner, "_agent_cache_lock", None)
+@@ -6203,6 +6205,7 @@ class TurnRunner:
+                 provider_require_parameters=pr.get("require_parameters", False),
+                 provider_data_collection=pr.get("data_collection"),
+                 session_id=ctx.session_id,
++                memory_auto_retain=getattr(ctx.source, "memory_auto_retain", True) is True,
+                 platform=platform_key,
+                 user_id=ctx.source.user_id,
+                 user_id_alt=ctx.source.user_id_alt,
+@@ -24528,6 +24531,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
+                     provider_require_parameters=pr.get("require_parameters", False),
+                     provider_data_collection=pr.get("data_collection"),
+                     session_id=task_id,
++                    memory_auto_retain=getattr(source, "memory_auto_retain", True) is True,
+                     platform=platform_key,
+                     user_id=source.user_id,
+                     user_id_alt=source.user_id_alt,
+diff --git a/gateway/session.py b/gateway/session.py
+index 32a343cced8..1e9b8056e58 100644
+--- a/gateway/session.py
++++ b/gateway/session.py
+@@ -205,6 +205,8 @@ class SessionSource:
+     # it. Without this, every channel message collapses into one parent-channel
+     # session and only the first auto-thread ever gets an auto-title/rename.
+     prospective_thread_id: Optional[str] = None
++    # Automation-owned policy, never taken from the inbound webhook payload.
++    memory_auto_retain: bool = True
+ 
+     # Internal, wire-INVISIBLE trust signal: True when this event was delivered
+     # to the gateway over the per-instance-authenticated relay WebSocket (the
+@@ -260,6 +262,7 @@ class SessionSource:
+             "user_name": self.user_name,
+             "thread_id": self.thread_id,
+             "chat_topic": self.chat_topic,
++            "memory_auto_retain": self.memory_auto_retain,
+         }
+         if self.user_id_alt:
+             d["user_id_alt"] = self.user_id_alt
+@@ -298,6 +301,7 @@ class SessionSource:
+             user_name=data.get("user_name"),
+             thread_id=data.get("thread_id"),
+             chat_topic=data.get("chat_topic"),
++            memory_auto_retain=data.get("memory_auto_retain", True) is True,
+             user_id_alt=data.get("user_id_alt"),
+             chat_id_alt=data.get("chat_id_alt"),
+             # D-Q2.5 dual-read: prefer the canonical `scope_id`, fall back to the
+diff --git a/hermes_cli/cron.py b/hermes_cli/cron.py
+index bb6e94e32f2..2e1aa08e8a1 100644
+--- a/hermes_cli/cron.py
++++ b/hermes_cli/cron.py
+@@ -702,6 +702,7 @@ def cron_create(args):
+         monitor_url=getattr(args, "monitor_url", None),
+         continuity=getattr(args, "continuity", None),
+         reasoning_effort=getattr(args, "reasoning_effort", None),
++        memory_auto_retain=getattr(args, "memory_auto_retain", None),
+     )
+     if not result.get("success"):
+         print(color(f"Failed to create job: {result.get('error', 'unknown error')}", Colors.RED))
+@@ -777,6 +778,7 @@ def cron_edit(args):
+         monitor_url=getattr(args, "monitor_url", None),
+         continuity=getattr(args, "continuity", None),
+         reasoning_effort=getattr(args, "reasoning_effort", None),
++        memory_auto_retain=getattr(args, "memory_auto_retain", None),
+     )
+     if not result.get("success"):
+         print(color(f"Failed to update job: {result.get('error', 'unknown error')}", Colors.RED))
+diff --git a/hermes_cli/subcommands/cron.py b/hermes_cli/subcommands/cron.py
+index b9d7f085693..44556599b53 100644
+--- a/hermes_cli/subcommands/cron.py
++++ b/hermes_cli/subcommands/cron.py
+@@ -6,6 +6,7 @@ import ``main`` (cycle avoidance).
+ """
+ 
+ from __future__ import annotations
++from argparse import BooleanOptionalAction
+ 
+ from typing import Callable
+ 
+@@ -43,6 +44,8 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
+         ),
+     )
+     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
++    cron_create.add_argument("--memory-auto-retain", action=BooleanOptionalAction, default=False,
++                            help="Automatically retain this job's runs in memory (default off)")
+     cron_create.add_argument(
+         "--skill",
+         dest="skills",
+@@ -143,6 +146,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
+     cron_edit.add_argument("--name", help="New job name")
+     cron_edit.add_argument("--deliver", help="New delivery target")
+     cron_edit.add_argument("--repeat", type=int, help="New repeat count")
++    cron_edit.add_argument("--memory-auto-retain", action=BooleanOptionalAction, default=None)
+     cron_edit.add_argument(
+         "--skill",
+         dest="skills",
+diff --git a/hermes_cli/subcommands/webhook.py b/hermes_cli/subcommands/webhook.py
+index 38085141b06..0b14bf2bba8 100644
+--- a/hermes_cli/subcommands/webhook.py
++++ b/hermes_cli/subcommands/webhook.py
+@@ -5,6 +5,7 @@ Handler injected to avoid importing ``main``.
+ """
+ 
+ from __future__ import annotations
++from argparse import BooleanOptionalAction
+ 
+ from typing import Callable
+ 
+@@ -25,6 +26,8 @@ def build_webhook_parser(subparsers, *, cmd_webhook: Callable) -> None:
+         "subscribe", aliases=["add"], help="Create a webhook subscription"
+     )
+     wh_sub.add_argument("name", help="Route name (used in URL: /webhooks/<name>)")
++    wh_sub.add_argument("--memory-auto-retain", action=BooleanOptionalAction, default=None,
++                        help="Automatically retain executions in memory (default off)")
+     wh_sub.add_argument(
+         "--prompt", default="", help="Prompt template with {dot.notation} payload refs"
+     )
+diff --git a/hermes_cli/webhook.py b/hermes_cli/webhook.py
+index 9b9de6cd5a6..1f322b0560f 100644
+--- a/hermes_cli/webhook.py
++++ b/hermes_cli/webhook.py
+@@ -172,6 +172,11 @@ def _cmd_subscribe(args):
+     events = [e.strip() for e in args.events.split(",")] if args.events else []
+ 
+     route = {
++        "memory_auto_retain": (
++            getattr(args, "memory_auto_retain", None)
++            if getattr(args, "memory_auto_retain", None) is not None
++            else (subs.get(name) or {}).get("memory_auto_retain", False)
++        ) is True,
+         "description": args.description or f"Agent-created subscription: {name}",
+         "events": events,
+         "secret": secret,
+diff --git a/plugins/memory/hindsight/__init__.py b/plugins/memory/hindsight/__init__.py
+index 7f9079ee271..fb8a04f09a8 100644
+--- a/plugins/memory/hindsight/__init__.py
++++ b/plugins/memory/hindsight/__init__.py
+@@ -1715,7 +1715,12 @@ class HindsightMemoryProvider(MemoryProvider):
+         ).strip() or "Assistant"
+ 
+         # Retain controls
+-        self._auto_retain = self._config.get("auto_retain", True)
++        # Per-execution policy can suppress writes, never enable a globally
++        # disabled provider. Recall and explicit memory tools stay available.
++        self._auto_retain = (
++            self._config.get("auto_retain", True) is True
++            and kwargs.get("auto_retain", True) is True
++        )
+         self._retain_every_n_turns = max(1, int(self._config.get("retain_every_n_turns", 1)))
+         self._retain_context = self._config.get("retain_context", "conversation between Hermes Agent and the User")
+ 
+diff --git a/run_agent.py b/run_agent.py
+index 9f145baddf4..d33020c4372 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -510,6 +510,7 @@ class AIAgent:
+         skip_context_files: bool = False,
+         load_soul_identity: bool = False,
+         skip_memory: bool = False,
++        memory_auto_retain: bool = True,
+         skip_background_review: bool = False,
+         session_db=None,
+         parent_session_id: str = None,
+@@ -603,6 +604,7 @@ class AIAgent:
+             skip_context_files=skip_context_files,
+             load_soul_identity=load_soul_identity,
+             skip_memory=skip_memory,
++            memory_auto_retain=memory_auto_retain,
+             skip_background_review=skip_background_review,
+             session_db=session_db,
+             parent_session_id=parent_session_id,
+diff --git a/tests/cron/test_automation_memory_policy.py b/tests/cron/test_automation_memory_policy.py
+new file mode 100644
+index 00000000000..7b8d7da460e
+--- /dev/null
++++ b/tests/cron/test_automation_memory_policy.py
+@@ -0,0 +1,64 @@
++from argparse import ArgumentParser
++from unittest.mock import patch
++
++import pytest
++
++from cron.jobs import create_job, get_job, update_job
++from hermes_cli.subcommands.cron import build_cron_parser
++from gateway.session import SessionSource
++from gateway.config import Platform
++
++
++def test_cron_memory_default_and_individual_updates():
++    first = create_job(prompt="Summarize sales", schedule="0 9 * * *")
++    second = create_job(prompt="Track a commitment", schedule="0 10 * * *", memory_auto_retain=True)
++    assert first["memory_auto_retain"] is False
++    assert second["memory_auto_retain"] is True
++    update_job(first["id"], {"memory_auto_retain": True})
++    update_job(second["id"], {"memory_auto_retain": False})
++    assert get_job(first["id"])["memory_auto_retain"] is True
++    assert get_job(second["id"])["memory_auto_retain"] is False
++    update_job(first["id"], {"name": "New name"})
++    assert get_job(first["id"])["memory_auto_retain"] is True
++    with pytest.raises(ValueError):
++        update_job(first["id"], {"memory_auto_retain": "false"})
++
++
++def test_cron_cli_boolean_flags_preserve_omitted_edit():
++    parser = ArgumentParser()
++    build_cron_parser(parser.add_subparsers(), cmd_cron=lambda _: None)
++    assert parser.parse_args(["cron", "create", "1h", "hello"]).memory_auto_retain is False
++    assert parser.parse_args(["cron", "create", "--memory-auto-retain", "1h", "hello"]).memory_auto_retain is True
++    assert parser.parse_args(["cron", "edit", "job123", "--no-memory-auto-retain"]).memory_auto_retain is False
++    assert parser.parse_args(["cron", "edit", "job123", "--name", "other"]).memory_auto_retain is None
++
++
++def test_session_source_preserves_retention_without_changing_chat_default():
++    source = SessionSource(platform=Platform.WEBHOOK, chat_id="orders", memory_auto_retain=False)
++    assert SessionSource.from_dict(source.to_dict()).memory_auto_retain is False
++    assert SessionSource.from_dict({"platform": "telegram", "chat_id": "chat"}).memory_auto_retain is True
++
++
++@pytest.mark.parametrize("policy", [None, False, True])
++def test_scheduler_applies_each_job_policy_without_disabling_recall(tmp_path, policy):
++    from cron.scheduler import run_job
++
++    job = {"id": "memory-policy", "name": "test", "prompt": "hello"}
++    if policy is not None:
++        job["memory_auto_retain"] = policy
++    runtime = {"api_key": "test-key", "base_url": "https://example.invalid/v1",
++               "provider": "openrouter", "api_mode": "chat_completions"}
++    with (
++        patch("cron.scheduler._hermes_home", tmp_path),
++        patch("cron.scheduler._resolve_origin", return_value=None),
++        patch("hermes_cli.env_loader.load_hermes_dotenv"),
++        patch("hermes_cli.env_loader.reset_secret_source_cache"),
++        patch("hermes_state.SessionDB"),
++        patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=runtime),
++        patch("run_agent.AIAgent") as agent,
++    ):
++        agent.return_value.run_conversation.return_value = {"final_response": "ok"}
++        success, _, _, error = run_job(job)
++    assert success, error
++    assert agent.call_args.kwargs["memory_auto_retain"] is (policy is True)
++    assert agent.call_args.kwargs["skip_memory"] is False
+diff --git a/tests/gateway/test_webhook_adapter.py b/tests/gateway/test_webhook_adapter.py
+index 4f5cdb13900..71ad6fbef07 100644
+--- a/tests/gateway/test_webhook_adapter.py
++++ b/tests/gateway/test_webhook_adapter.py
+@@ -127,6 +127,32 @@ def _svix_signature(body: bytes, secret: str, msg_id: str, timestamp: str) -> st
+ # ===================================================================
+ 
+ 
++@pytest.mark.asyncio
++@pytest.mark.parametrize("policy", [None, False, True])
++async def test_retention_policy_comes_from_route_not_event_payload(policy):
++    route = {"secret": "test-secret", "prompt": "Check the order"}
++    if policy is not None:
++        route["memory_auto_retain"] = policy
++    adapter = _make_adapter(routes={"orders": route})
++    event_received = asyncio.Event()
++    events = []
++
++    async def capture(event):
++        events.append(event)
++        event_received.set()
++
++    adapter.handle_message = capture
++    body = json.dumps({"memory_auto_retain": policy is not True}).encode()
++    request = _mock_request(
++        headers={"X-Webhook-Signature": _generic_signature(body, "test-secret")},
++        body=body, match_info={"route_name": "orders"},
++    )
++    response = await adapter._handle_webhook(request)
++    assert response.status == 202
++    await asyncio.wait_for(event_received.wait(), 2)
++    assert events[0].source.memory_auto_retain is (policy is True)
++
++
+ class TestValidateSignature:
+     """Tests for WebhookAdapter._validate_signature."""
+ 
+diff --git a/tests/hermes_cli/test_webhook_cli.py b/tests/hermes_cli/test_webhook_cli.py
+index 4fecf7f279c..567cf71cfc3 100644
+--- a/tests/hermes_cli/test_webhook_cli.py
++++ b/tests/hermes_cli/test_webhook_cli.py
+@@ -52,6 +52,15 @@ def test_webhook_base_url_maps_wildcard_hosts_to_localhost(monkeypatch, host):
+ 
+ 
+ class TestSubscribe:
++    def test_retention_is_per_subscription_and_omitted_update_preserves_it(self):
++        webhook_command(_make_args(webhook_action="subscribe", name="off", secret="test"))
++        webhook_command(_make_args(webhook_action="subscribe", name="on", secret="test", memory_auto_retain=True))
++        assert _load_subscriptions()["off"]["memory_auto_retain"] is False
++        assert _load_subscriptions()["on"]["memory_auto_retain"] is True
++        webhook_command(_make_args(webhook_action="subscribe", name="on", secret="test", description="Changed"))
++        assert _load_subscriptions()["on"]["memory_auto_retain"] is True
++        webhook_command(_make_args(webhook_action="subscribe", name="on", secret="test", memory_auto_retain=False))
++        assert _load_subscriptions()["on"]["memory_auto_retain"] is False
+ 
+ 
+     def test_custom_secret(self):
+@@ -152,4 +161,3 @@ class TestWebhookEnabledGate:
+         )
+         import hermes_cli.webhook as wh_mod
+         assert wh_mod._is_webhook_enabled() is False
+-
+diff --git a/tests/plugins/memory/test_hindsight_provider.py b/tests/plugins/memory/test_hindsight_provider.py
+index 475e3adb372..a809b17d739 100644
+--- a/tests/plugins/memory/test_hindsight_provider.py
++++ b/tests/plugins/memory/test_hindsight_provider.py
+@@ -215,6 +215,23 @@ def provider_with_config(tmp_path, monkeypatch):
+     return _make
+ 
+ 
++@pytest.mark.parametrize("global_enabled,run_enabled,expected", [(True, False, False), (True, True, True), (False, True, False)])
++def test_execution_retention_override_keeps_recall_and_config(provider_with_config, tmp_path, global_enabled, run_enabled, expected):
++    p = provider_with_config(auto_retain=global_enabled)
++    p.initialize(session_id="automation", hermes_home=str(tmp_path), platform="webhook", auto_retain=run_enabled)
++    client = _make_mock_client()
++    p._client = client
++    assert p._auto_retain is expected
++    assert p._auto_recall is True
++    before = p._turn_counter
++    if not expected:
++        p.sync_turn("An order was checked", "Nothing actionable")
++        assert p._turn_counter == before
++        assert not client.aretain.called
++    assert json.loads((tmp_path / "hindsight" / "config.json").read_text())["auto_retain"] is global_enabled
++    p.shutdown()
++
++
+ def test_normalize_retain_tags_accepts_csv_and_dedupes():
+     assert _normalize_retain_tags("agent:fakeassistantname, source_system:hermes-agent, agent:fakeassistantname") == [
+         "agent:fakeassistantname",
+diff --git a/tools/cronjob_tools.py b/tools/cronjob_tools.py
+index bc9df41bbf5..196338adea2 100644
+--- a/tools/cronjob_tools.py
++++ b/tools/cronjob_tools.py
+@@ -1482,6 +1482,7 @@ def cronjob(
+     monitor_script: Optional[str] = None,
+     monitor_url: Optional[str] = None,
+     reasoning_effort: Optional[str] = None,
++    memory_auto_retain: Optional[bool] = None,
+     task_id: str = None,
+     session_id: Optional[str] = None,
+ ) -> str:
+@@ -1598,6 +1599,7 @@ def cronjob(
+                     # dispatch below: models do not make model-config
+                     # decisions (standing policy).
+                     reasoning_effort=reasoning_effort,
++                    memory_auto_retain=memory_auto_retain is True,
+                 )
+             except CronSchedulerRegistrationError as exc:
+                 _partial = exc.to_dict()
+@@ -1810,6 +1812,10 @@ def cronjob(
+                 updates["provider"] = _normalize_optional_job_value(provider)
+             if base_url is not None:
+                 updates["base_url"] = _normalize_optional_job_value(base_url, strip_trailing_slash=True)
++            if memory_auto_retain is not None:
++                if type(memory_auto_retain) is not bool:
++                    raise ValueError("memory_auto_retain must be a boolean")
++                updates["memory_auto_retain"] = memory_auto_retain
+             if reasoning_effort is not None:
+                 # CLI-only lane (see create above): update_job validates
+                 # against the canonical grammar; empty string clears the pin.
+-- 
+2.40.0.windows.1

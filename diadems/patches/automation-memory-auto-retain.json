@@ -1,0 +1,10 @@
+{
+  "capability": "automation_memory_auto_retain",
+  "release_base": "7778d69b21da5427830d992ca5128a090ec0d321",
+  "release_commit": "3085bfae17ebc646c4f3baf50155768dccfa3038",
+  "tracking_upstream": "4baf4269ffb",
+  "status": "release_patch_tracked_forward_port_required",
+  "patch": "automation-memory-auto-retain.patch",
+  "note": "Applies only to the approved v2026.8.31 release branch. Current upstream differs at gateway, cron and provider initialization seams; this tracking branch does not claim a compatible forward port.",
+  "retire_when": "An approved upstream release exposes equivalent per-automation automatic retention and passes the Diadems contracts."
+}
