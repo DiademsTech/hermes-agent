@@ -1482,6 +1482,7 @@ def cronjob(
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    memory_auto_retain: Optional[bool] = None,
     task_id: str = None,
     session_id: Optional[str] = None,
 ) -> str:
@@ -1598,6 +1599,7 @@ def cronjob(
                     # dispatch below: models do not make model-config
                     # decisions (standing policy).
                     reasoning_effort=reasoning_effort,
+                    memory_auto_retain=memory_auto_retain is True,
                 )
             except CronSchedulerRegistrationError as exc:
                 _partial = exc.to_dict()
@@ -1810,6 +1812,10 @@ def cronjob(
                 updates["provider"] = _normalize_optional_job_value(provider)
             if base_url is not None:
                 updates["base_url"] = _normalize_optional_job_value(base_url, strip_trailing_slash=True)
+            if memory_auto_retain is not None:
+                if type(memory_auto_retain) is not bool:
+                    raise ValueError("memory_auto_retain must be a boolean")
+                updates["memory_auto_retain"] = memory_auto_retain
             if reasoning_effort is not None:
                 # CLI-only lane (see create above): update_job validates
                 # against the canonical grammar; empty string clears the pin.

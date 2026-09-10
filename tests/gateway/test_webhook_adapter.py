@@ -127,6 +127,32 @@ def _svix_signature(body: bytes, secret: str, msg_id: str, timestamp: str) -> st
 # ===================================================================
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", [None, False, True])
+async def test_retention_policy_comes_from_route_not_event_payload(policy):
+    route = {"secret": "test-secret", "prompt": "Check the order"}
+    if policy is not None:
+        route["memory_auto_retain"] = policy
+    adapter = _make_adapter(routes={"orders": route})
+    event_received = asyncio.Event()
+    events = []
+
+    async def capture(event):
+        events.append(event)
+        event_received.set()
+
+    adapter.handle_message = capture
+    body = json.dumps({"memory_auto_retain": policy is not True}).encode()
+    request = _mock_request(
+        headers={"X-Webhook-Signature": _generic_signature(body, "test-secret")},
+        body=body, match_info={"route_name": "orders"},
+    )
+    response = await adapter._handle_webhook(request)
+    assert response.status == 202
+    await asyncio.wait_for(event_received.wait(), 2)
+    assert events[0].source.memory_auto_retain is (policy is True)
+
+
 class TestValidateSignature:
     """Tests for WebhookAdapter._validate_signature."""
 

@@ -1715,7 +1715,12 @@ class HindsightMemoryProvider(MemoryProvider):
         ).strip() or "Assistant"
 
         # Retain controls
-        self._auto_retain = self._config.get("auto_retain", True)
+        # Per-execution policy can suppress writes, never enable a globally
+        # disabled provider. Recall and explicit memory tools stay available.
+        self._auto_retain = (
+            self._config.get("auto_retain", True) is True
+            and kwargs.get("auto_retain", True) is True
+        )
         self._retain_every_n_turns = max(1, int(self._config.get("retain_every_n_turns", 1)))
         self._retain_context = self._config.get("retain_context", "conversation between Hermes Agent and the User")
 

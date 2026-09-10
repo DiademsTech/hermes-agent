@@ -172,6 +172,11 @@ def _cmd_subscribe(args):
     events = [e.strip() for e in args.events.split(",")] if args.events else []
 
     route = {
+        "memory_auto_retain": (
+            getattr(args, "memory_auto_retain", None)
+            if getattr(args, "memory_auto_retain", None) is not None
+            else (subs.get(name) or {}).get("memory_auto_retain", False)
+        ) is True,
         "description": args.description or f"Agent-created subscription: {name}",
         "events": events,
         "secret": secret,

@@ -205,6 +205,8 @@ class SessionSource:
     # it. Without this, every channel message collapses into one parent-channel
     # session and only the first auto-thread ever gets an auto-title/rename.
     prospective_thread_id: Optional[str] = None
+    # Automation-owned policy, never taken from the inbound webhook payload.
+    memory_auto_retain: bool = True
 
     # Internal, wire-INVISIBLE trust signal: True when this event was delivered
     # to the gateway over the per-instance-authenticated relay WebSocket (the
@@ -260,6 +262,7 @@ class SessionSource:
             "user_name": self.user_name,
             "thread_id": self.thread_id,
             "chat_topic": self.chat_topic,
+            "memory_auto_retain": self.memory_auto_retain,
         }
         if self.user_id_alt:
             d["user_id_alt"] = self.user_id_alt
@@ -298,6 +301,7 @@ class SessionSource:
             user_name=data.get("user_name"),
             thread_id=data.get("thread_id"),
             chat_topic=data.get("chat_topic"),
+            memory_auto_retain=data.get("memory_auto_retain", True) is True,
             user_id_alt=data.get("user_id_alt"),
             chat_id_alt=data.get("chat_id_alt"),
             # D-Q2.5 dual-read: prefer the canonical `scope_id`, fall back to the

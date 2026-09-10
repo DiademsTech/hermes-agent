@@ -5,6 +5,7 @@ Handler injected to avoid importing ``main``.
 """
 
 from __future__ import annotations
+from argparse import BooleanOptionalAction
 
 from typing import Callable
 
@@ -25,6 +26,8 @@ def build_webhook_parser(subparsers, *, cmd_webhook: Callable) -> None:
         "subscribe", aliases=["add"], help="Create a webhook subscription"
     )
     wh_sub.add_argument("name", help="Route name (used in URL: /webhooks/<name>)")
+    wh_sub.add_argument("--memory-auto-retain", action=BooleanOptionalAction, default=None,
+                        help="Automatically retain executions in memory (default off)")
     wh_sub.add_argument(
         "--prompt", default="", help="Prompt template with {dot.notation} payload refs"
     )

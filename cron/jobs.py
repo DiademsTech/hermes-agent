@@ -2225,6 +2225,7 @@ def create_job(
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    memory_auto_retain: bool = False,
 ) -> Dict[str, Any]:
     """
     Create a new cron job.
@@ -2296,6 +2297,8 @@ def create_job(
     Returns:
         The created job dict
     """
+    if type(memory_auto_retain) is not bool:
+        raise ValueError("memory_auto_retain must be a boolean")
     parsed_schedule = parse_schedule(schedule)
 
     # Normalize repeat: treat 0 or negative values as None (infinite).
@@ -2410,6 +2413,7 @@ def create_job(
         # Hash-suppression state for monitor jobs: {"last_output_hash": ...,
         # "last_changed_at": ...}. None until the first monitor tick.
         "monitor_state": None,
+        "memory_auto_retain": memory_auto_retain is True,
         "context_from": context_from,
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
@@ -2521,6 +2525,8 @@ def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]
     # path component under OUTPUT_DIR — letting an update change it leaks
     # path-escape values into output writes/deletes.
     bad_fields = _IMMUTABLE_JOB_FIELDS.intersection(updates or {})
+    if "memory_auto_retain" in updates and type(updates["memory_auto_retain"]) is not bool:
+        raise ValueError("memory_auto_retain must be a boolean")
     if bad_fields:
         raise ValueError(
             f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}"

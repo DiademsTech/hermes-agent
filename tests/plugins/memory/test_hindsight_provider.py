@@ -215,6 +215,23 @@ def provider_with_config(tmp_path, monkeypatch):
     return _make
 
 
+@pytest.mark.parametrize("global_enabled,run_enabled,expected", [(True, False, False), (True, True, True), (False, True, False)])
+def test_execution_retention_override_keeps_recall_and_config(provider_with_config, tmp_path, global_enabled, run_enabled, expected):
+    p = provider_with_config(auto_retain=global_enabled)
+    p.initialize(session_id="automation", hermes_home=str(tmp_path), platform="webhook", auto_retain=run_enabled)
+    client = _make_mock_client()
+    p._client = client
+    assert p._auto_retain is expected
+    assert p._auto_recall is True
+    before = p._turn_counter
+    if not expected:
+        p.sync_turn("An order was checked", "Nothing actionable")
+        assert p._turn_counter == before
+        assert not client.aretain.called
+    assert json.loads((tmp_path / "hindsight" / "config.json").read_text())["auto_retain"] is global_enabled
+    p.shutdown()
+
+
 def test_normalize_retain_tags_accepts_csv_and_dedupes():
     assert _normalize_retain_tags("agent:fakeassistantname, source_system:hermes-agent, agent:fakeassistantname") == [
         "agent:fakeassistantname",

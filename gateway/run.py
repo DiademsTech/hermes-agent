@@ -5981,6 +5981,8 @@ class TurnRunner:
             user_id_alt=getattr(ctx.source, "user_id_alt", None),
             skip_context_files=skip_context_files,
         )
+        # A reused instance must not retain the previous execution's policy.
+        _sig = (_sig, getattr(ctx.source, "memory_auto_retain", True) is True)
         agent = None
         reused_cached_agent = False
         _cache_lock = getattr(self._runner, "_agent_cache_lock", None)
@@ -6203,6 +6205,7 @@ class TurnRunner:
                 provider_require_parameters=pr.get("require_parameters", False),
                 provider_data_collection=pr.get("data_collection"),
                 session_id=ctx.session_id,
+                memory_auto_retain=getattr(ctx.source, "memory_auto_retain", True) is True,
                 platform=platform_key,
                 user_id=ctx.source.user_id,
                 user_id_alt=ctx.source.user_id_alt,
@@ -24528,6 +24531,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     provider_require_parameters=pr.get("require_parameters", False),
                     provider_data_collection=pr.get("data_collection"),
                     session_id=task_id,
+                    memory_auto_retain=getattr(source, "memory_auto_retain", True) is True,
                     platform=platform_key,
                     user_id=source.user_id,
                     user_id_alt=source.user_id_alt,

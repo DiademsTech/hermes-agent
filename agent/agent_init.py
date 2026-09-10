@@ -600,6 +600,7 @@ def init_agent(
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
+    memory_auto_retain: bool = True,
     skip_background_review: bool = False,
     session_db=None,
     parent_session_id: str = None,
@@ -1929,6 +1930,7 @@ def init_agent(
                         "platform": platform or "cli",
                         "hermes_home": str(get_hermes_home()),
                         "agent_context": "primary",
+                        "auto_retain": memory_auto_retain is True,
                     }
                     if _init_kwargs["platform"] == "cli":
                         _init_kwargs["warning_callback"] = agent._emit_warning

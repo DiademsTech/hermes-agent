@@ -949,6 +949,7 @@ class WebhookAdapter(BasePlatformAdapter):
         )
         if profile and isinstance(profile, str):
             source.profile = profile
+        source.memory_auto_retain = route_config.get("memory_auto_retain", False) is True
         event = MessageEvent(
             text=prompt,
             message_type=MessageType.TEXT,
