@@ -3354,6 +3354,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_events_sse": True,
                 "run_stop": True,
                 "run_steer": True,
+                "run_queue": True,
                 "run_approval_response": True,
                 "tool_progress_events": True,
                 "approval_events": True,
@@ -7208,6 +7209,9 @@ class APIServerAdapter(BasePlatformAdapter):
         if limit <= 0:
             return None
         inflight = self.active_agent_work_count()
+        # Waiting FIFO items count for shutdown draining, but have no agent
+        # and do not occupy execution slots in unrelated sessions.
+        inflight -= len(self._queued_run_inputs)
         # The current request owns one reservation until it hands off to
         # _run_agent() or /v1/runs task registration. It must not consume its
         # own last available slot; other admitted requests remain counted.
@@ -7655,6 +7659,12 @@ class APIServerAdapter(BasePlatformAdapter):
             request,
             _api_server=sys.modules[__name__],
         )
+
+    async def _handle_list_runs(self, request: "web.Request") -> "web.Response":
+        return await _api_runs._handle_list_runs(self, request, _api_server=sys.modules[__name__])
+
+    async def _handle_delete_queued_run(self, request: "web.Request") -> "web.Response":
+        return await _api_runs._handle_delete_queued_run(self, request, _api_server=sys.modules[__name__])
 
     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
         """GET /v1/runs/{run_id}/events — stream structured lifecycle events."""

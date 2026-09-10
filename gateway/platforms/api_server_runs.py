@@ -71,6 +71,11 @@ def _initialize_run_state(self, *, store_factory) -> None:
     # Active run agent/task references for stop support
     self._active_run_agents: Dict[str, Any] = {}
     self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
+    # Per-profile/session FIFO admission. Request bodies remain process-local;
+    # the durable idempotency store continues to contain only status/handles.
+    self._run_lanes: Dict[str, tuple[str, str]] = {}
+    self._queued_run_inputs: Dict[str, str] = {}
+    self._queue_mode_run_ids: set[str] = set()
     # Stop is cooperative: the executor thread may outlive the HTTP request.
     self._stopping_run_ids: set[str] = set()
     # Pollable run status for dashboards and external control-plane UIs.
@@ -83,6 +88,8 @@ def _initialize_run_state(self, *, store_factory) -> None:
 def _http_routes(self) -> list[tuple[str, str, Any]]:
     return [
         ("POST", "/v1/runs", self._handle_runs),
+        ("GET", "/v1/runs", self._handle_list_runs),
+        ("DELETE", "/v1/runs/{run_id}/queue", self._handle_delete_queued_run),
         ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
@@ -544,6 +551,22 @@ async def _handle_runs(
                 conversation_history.append({"role": msg["role"], "content": str(content)})
 
     session_id = body.get("session_id") or stored_session_id
+    queue_mode = body.get("queue", False)
+    if not isinstance(queue_mode, bool):
+        return web.json_response(_openai_error("'queue' must be a boolean"), status=400)
+    if queue_mode and self._room_grant_token(request):
+        return web.json_response(_openai_error("Queue requires a profile API credential"), status=403)
+    if queue_mode and not self._run_idempotency_store.durable:
+        return web.json_response(_openai_error("Queue storage unavailable"), status=503)
+    if queue_mode and (
+        not isinstance(session_id, str) or not session_id.strip()
+        or not isinstance(raw_input, str) or raw_history or previous_response_id
+        or not idempotency_key
+    ):
+        return web.json_response(_openai_error(
+            "Queued runs require a session_id, text input and Idempotency-Key; "
+            "history must come from the native session", code="invalid_queued_run"
+        ), status=400)
     route = self._resolve_route(body.get("model"))
     agent_overrides = _request_agent_overrides(body, virtual_model=self._model_name)
     selection_error = self._request_route_conflict_error(
@@ -593,11 +616,29 @@ async def _handle_runs(
             )
 
     # Enforce concurrency only for a genuinely new run.
-    limited = self._concurrency_limited_response()
+    lane = (str(_api_request_profile.get() or ""), str(session_id or ""))
+    predecessors = [
+        task for rid, task in self._active_run_tasks.items()
+        if not task.done() and self._run_lanes.get(rid) == lane
+    ] if session_id else []
+    if not queue_mode and any(
+        self._run_lanes.get(rid) == lane for rid in self._queue_mode_run_ids
+    ):
+        return web.json_response(_openai_error(
+            "This session has queued work; submit with queue=true", code="session_busy"
+        ), status=409)
+    if queue_mode and (
+        len(predecessors) >= 20 or len(self._queued_run_inputs) >= 64
+        or len(self._run_idempotency_store.queue_inputs(idempotency_scope, session_id)) >= 20
+    ):
+        return web.json_response(_openai_error(
+            "Session queue is full", code="run_queue_full"
+        ), status=429)
+    limited = None if queue_mode and predecessors else self._concurrency_limited_response()
     if limited is not None:
         return limited
 
-    if not conversation_history and session_id and not previous_response_id:
+    if not queue_mode and not conversation_history and session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(
             str(session_id)
         )
@@ -675,6 +716,7 @@ async def _handle_runs(
             owner_pid=self._run_owner_pid,
             owner_started=self._run_owner_started,
             retention_until=_room_retention_until(request),
+            **({"queue_input": user_message} if queue_mode else {}),
         )
         if outcome != "created":
             self._run_streams.pop(run_id, None)
@@ -718,7 +760,27 @@ async def _handle_runs(
     )
 
     async def _run_and_close():
+        nonlocal conversation_history
         try:
+            if queue_mode:
+                # Await every predecessor: cancelling a middle queued item
+                # must never let its successor overtake a still-running turn.
+                for predecessor in predecessors:
+                    try:
+                        await asyncio.shield(predecessor)
+                    except asyncio.CancelledError:
+                        if asyncio.current_task().cancelling():
+                            raise
+                    except Exception:
+                        pass  # A failed turn does not discard later messages.
+                # Another session may have occupied the released slot first.
+                # Claim it without an await between checking and marking running.
+                while self._concurrency_limited_response() is not None:
+                    await asyncio.sleep(0.05)
+                self._queued_run_inputs.pop(run_id, None)
+                self._set_run_status(run_id, "running")
+                with self._profile_scope(request_profile):
+                    conversation_history = await self._conversation_history_for_session(session_id)
             self._set_run_status(run_id, "running")
             if run_id in self._stopping_run_ids:
                 _put_event_if_active({
@@ -847,6 +909,8 @@ async def _handle_runs(
                         # ownership so stop/cancel can reap only the
                         # background processes this run created (#76115).
                         _publish_turn_process_ownership(agent, effective_task_id)
+                        if queue_mode:
+                            self._run_idempotency_store.discard_queue_input(run_id)
                         r = agent.run_conversation(
                             user_message=user_message,
                             conversation_history=conversation_history,
@@ -888,7 +952,16 @@ async def _handle_runs(
                     }
                     return r, u
 
-            result, usage = await asyncio.get_running_loop().run_in_executor(None, _run_sync)
+            execution = asyncio.get_running_loop().run_in_executor(None, _run_sync)
+            try:
+                result, usage = await asyncio.shield(execution)
+            except asyncio.CancelledError:
+                _api_server.request_hard_interrupt(agent, "Run task cancelled")
+                # Cancelling an asyncio wrapper does not stop its thread. Keep
+                # the FIFO lane until the writer really exits.
+                with suppress(Exception):
+                    await asyncio.shield(execution)
+                raise
             if (
                 run_id in self._stopping_run_ids
                 and isinstance(result, dict)
@@ -946,6 +1019,7 @@ async def _handle_runs(
                     **({"pending_steer": pending_steer} if pending_steer else {}),
                 )
         except asyncio.CancelledError:
+            self._run_idempotency_store.discard_queue_input(run_id)
             self._set_run_status(
                 run_id,
                 "cancelled",
@@ -1021,12 +1095,19 @@ async def _handle_runs(
                 pass
             self._active_run_agents.pop(run_id, None)
             self._active_run_tasks.pop(run_id, None)
+            self._run_lanes.pop(run_id, None)
+            self._queued_run_inputs.pop(run_id, None)
+            self._queue_mode_run_ids.discard(run_id)
             self._run_approval_sessions.pop(run_id, None)
             self._stopping_run_ids.discard(run_id)
 
     self._activate_admitted_request()
     task = asyncio.create_task(_run_and_close())
     self._active_run_tasks[run_id] = task
+    self._run_lanes[run_id] = lane
+    if queue_mode:
+        self._queued_run_inputs[run_id] = user_message
+        self._queue_mode_run_ids.add(run_id)
     try:
         self._background_tasks.add(task)
     except TypeError:
@@ -1038,7 +1119,7 @@ async def _handle_runs(
         {"X-Hermes-Session-Key": gateway_session_key} if gateway_session_key else {}
     )
     return web.json_response(
-        {"run_id": run_id, "status": "started", "replayed": False},
+        {"run_id": run_id, "status": "queued" if queue_mode else "started", "replayed": False},
         status=202,
         headers=response_headers,
     )
@@ -1063,6 +1144,59 @@ def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
     return owner == scope or (
         owner is None and self._run_idempotency_store.owns_run(scope, run_id)
     )
+
+
+async def _handle_list_runs(self, request, *, _api_server):
+    """List one session's live turns and unconsumed inputs for another device."""
+    auth_err = self._check_run_auth(request, permission="status")
+    if auth_err:
+        return auth_err
+    # A room grant is run-scoped and must never enumerate a session.
+    if self._room_grant_token(request):
+        return web.json_response(_api_server._openai_error("Run-scoped credential"), status=403)
+    session_id = request.query.get("session_id", "")
+    if not session_id or len(session_id) > 256:
+        return web.json_response(_api_server._openai_error("session_id is required"), status=400)
+    scope = self._run_idempotency_scope(request)
+    records = {item["run_id"]: item for item in self._run_idempotency_store.queue_inputs(scope, session_id)}
+    lookup_key = request.query.get("idempotency_key")
+    if lookup_key:
+        _, record = self._run_idempotency_store.lookup(scope, lookup_key, "")
+        if record and record["status"].get("session_id") == session_id:
+            records = {record["run_id"]: records.get(record["run_id"], {"run_id": record["run_id"]})}
+        else:
+            records = {}
+    for rid in list(self._active_run_tasks):
+        status = self._run_statuses.get(rid, {})
+        if not lookup_key and status.get("session_id") == session_id and self._request_owns_run(request, rid):
+            records.setdefault(rid, {"run_id": rid})
+    result = []
+    for rid, item in records.items():
+        status = self._durable_run_status(request, rid)
+        if status is not None:
+            result.append({**status, **item})
+    result.sort(key=lambda item: (item.get("created_at", 0), item["run_id"]))
+    return web.json_response({"runs": result})
+
+
+async def _handle_delete_queued_run(self, request, *, _api_server):
+    """Remove only waiting work; never interrupt a turn that already started."""
+    auth_err = self._check_run_auth(request, permission="stop")
+    if auth_err:
+        return auth_err
+    rid = request.match_info["run_id"]
+    if not self._request_owns_run(request, rid):
+        return web.json_response(_api_server._openai_error("Run not found"), status=404)
+    status = self._durable_run_status(request, rid) or {}
+    if status.get("status") not in {"queued", "interrupted", "failed", "cancelled"}:
+        return web.json_response(_api_server._openai_error("Run already started", code="run_started"), status=409)
+    task = self._active_run_tasks.get(rid)
+    if task is not None:
+        self._stopping_run_ids.add(rid)
+        task.cancel()
+    self._run_idempotency_store.discard_queue_input(rid)
+    self._set_run_status(rid, "cancelled", last_event="run.cancelled")
+    return web.json_response({"run_id": rid, "status": "cancelled"})
 
 
 async def _handle_get_run(
@@ -1096,7 +1230,11 @@ async def _handle_get_run(
             _openai_error(f"Run not found: {run_id}", code="run_not_found"),
             status=404,
         )
-    return web.json_response(status)
+    return web.json_response({
+        **status,
+        **({"queued_input": self._queued_run_inputs[run_id]}
+           if run_id in self._queued_run_inputs else {}),
+    })
 
 
 async def _handle_run_events(
@@ -1434,6 +1572,9 @@ async def _handle_stop_run(
 
     self._set_run_status(run_id, "stopping", last_event="run.stopping")
     self._stopping_run_ids.add(run_id)
+
+    if run_id in self._queued_run_inputs and task is not None:
+        task.cancel()
 
     if agent is not None:
         try:

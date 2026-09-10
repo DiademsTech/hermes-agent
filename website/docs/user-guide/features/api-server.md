@@ -451,6 +451,28 @@ When `session_id` identifies an existing Hermes session and no explicit
 that session's active transcript. Session turn leases serialize concurrent
 writers and refresh the transcript after a contended wait.
 
+### Queue a follow-up turn
+
+When `features.run_queue` is true, send `queue: true`, a text `input`, a
+`session_id`, and an `Idempotency-Key` to `POST /v1/runs`. Hermes admits a
+separate turn and waits for earlier runs in that profile/session to finish.
+History is loaded when execution starts; do not supply explicit history or a
+previous response. Other sessions can execute independently. The queue accepts
+up to 20 unconsumed messages per session and 64 process-local waiting turns.
+
+`GET /v1/runs?session_id=...` lists active turns and unconsumed `queued_input`
+values for the authenticated profile. Multiple devices see the same list.
+An optional `idempotency_key` query resolves one admission after a lost response,
+including a completed turn. `DELETE /v1/runs/{run_id}/queue` cancels only waiting
+work and returns 409 if it has started; `/stop` remains the explicit interruption
+action. Run-scoped room grants cannot enumerate or submit a session queue.
+
+Queued inputs are stored in the capsule's private run database, separately from
+status reservations, until execution begins. Closing an HTTP/SSE connection
+does not cancel work. A gateway restart marks unfinished admissions interrupted;
+unconsumed messages remain visible for an explicit retry or removal. They are
+never automatically replayed after a restart with an ambiguous execution result.
+
 ### GET /v1/runs/\{run_id\}
 
 Poll the current run state. This is useful for dashboards that need status without holding an SSE connection open, or for UIs that reconnect after navigation.
