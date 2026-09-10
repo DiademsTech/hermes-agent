@@ -6,7 +6,7 @@ on:
       source_commit:
         description: Exact reviewed Hermes release commit
         required: true
-        default: 7778d69b21da5427830d992ca5128a090ec0d321
+        default: 06ca11f09bdd08382d89af4331e7a188a339ead3
       upstream_commit:
         description: Exact approved upstream tag commit
         required: true
@@ -14,7 +14,7 @@ on:
       image_tag:
         description: Candidate image tag (the digest remains authoritative)
         required: true
-        default: v2026.8.31-diadems.2
+        default: v2026.8.31-diadems.4
 
 permissions:
   contents: read
@@ -67,6 +67,7 @@ jobs:
             tests/gateway/test_api_server_compaction_projection.py \
             tests/gateway/test_api_server.py \
             tests/gateway/test_api_server_runs.py \
+            tests/gateway/test_api_server_run_queue.py \
             -q
 
       - name: Set up Docker Buildx
