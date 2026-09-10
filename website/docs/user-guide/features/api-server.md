@@ -467,6 +467,23 @@ including a completed turn. `DELETE /v1/runs/{run_id}/queue` cancels only waitin
 work and returns 409 if it has started; `/stop` remains the explicit interruption
 action. Run-scoped room grants cannot enumerate or submit a session queue.
 
+When `features.run_queue_controls` is true, listing also returns a
+`queue_revision` for each unconsumed input. Running inputs are no longer listed
+as queued, even while recovery data is retained internally.
+
+- `PATCH /v1/runs/{run_id}/queue` accepts `input` and `expected_revision`.
+- `PATCH /v1/runs/queue` accepts `session_id`, `order` and `expected_order`
+  (complete ordered lists of waiting run IDs).
+- `POST /v1/runs/{run_id}/queue/steer` accepts `expected_revision` and transfers
+  that input to a running turn in the same session/profile. If steering is
+  refused, the input stays queued; accepted steering removes it from the FIFO.
+
+Controls require a session credential. They reject stale revisions, changed
+orders and already claimed inputs with HTTP 409. No client should automatically
+retry an ambiguous steering response: a crash during handoff leaves recovery
+text interrupted rather than executing it a second time. Editing and ordering
+are durable in the capsule; neither changes the already executed transcript.
+
 Queued inputs are stored in the capsule's private run database, separately from
 status reservations, until execution begins. Closing an HTTP/SSE connection
 does not cancel work. A gateway restart marks unfinished admissions interrupted;

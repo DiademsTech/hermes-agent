@@ -3355,6 +3355,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_stop": True,
                 "run_steer": True,
                 "run_queue": True,
+                "run_queue_controls": True,
                 "run_approval_response": True,
                 "tool_progress_events": True,
                 "approval_events": True,
@@ -7677,6 +7678,18 @@ class APIServerAdapter(BasePlatformAdapter):
 
     async def _handle_delete_queued_run(self, request: "web.Request") -> "web.Response":
         return await _api_runs._handle_delete_queued_run(self, request, _api_server=sys.modules[__name__])
+
+    async def _handle_edit_queued_run(self, request):
+        from .api_server_queue_controls import edit_queue
+        return await edit_queue(self, request)
+
+    async def _handle_reorder_queue(self, request):
+        from .api_server_queue_controls import reorder_queue
+        return await reorder_queue(self, request)
+
+    async def _handle_steer_queued_run(self, request):
+        from .api_server_queue_controls import steer_queue
+        return await steer_queue(self, request)
 
     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
         """GET /v1/runs/{run_id}/events — stream structured lifecycle events."""

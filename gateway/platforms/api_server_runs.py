@@ -71,8 +71,8 @@ def _initialize_run_state(self, *, store_factory) -> None:
     # Active run agent/task references for stop support
     self._active_run_agents: Dict[str, Any] = {}
     self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
-    # Per-profile/session FIFO admission. Request bodies remain process-local;
-    # the durable idempotency store continues to contain only status/handles.
+    # Per-profile/session FIFO admission. Only unconsumed queue text is durable
+    # in the capsule; provider configuration and live objects stay process-local.
     self._run_lanes: Dict[str, tuple[str, str]] = {}
     self._deleting_run_sessions: set[tuple[str, str]] = set()
     self._queued_run_inputs: Dict[str, str] = {}
@@ -91,6 +91,9 @@ def _http_routes(self) -> list[tuple[str, str, Any]]:
         ("POST", "/v1/runs", self._handle_runs),
         ("GET", "/v1/runs", self._handle_list_runs),
         ("DELETE", "/v1/runs/{run_id}/queue", self._handle_delete_queued_run),
+        ("PATCH", "/v1/runs/queue", self._handle_reorder_queue),
+        ("PATCH", "/v1/runs/{run_id}/queue", self._handle_edit_queued_run),
+        ("POST", "/v1/runs/{run_id}/queue/steer", self._handle_steer_queued_run),
         ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
@@ -763,24 +766,20 @@ async def _handle_runs(
     )
 
     async def _run_and_close():
-        nonlocal conversation_history
+        nonlocal conversation_history, user_message
         try:
             if queue_mode:
-                # Await every predecessor: cancelling a middle queued item
-                # must never let its successor overtake a still-running turn.
-                for predecessor in predecessors:
-                    try:
-                        await asyncio.shield(predecessor)
-                    except asyncio.CancelledError:
-                        if asyncio.current_task().cancelling():
-                            raise
-                    except Exception:
-                        pass  # A failed turn does not discard later messages.
-                # Another session may have occupied the released slot first.
-                # Claim it without an await between checking and marking running.
-                while self._concurrency_limited_response() is not None:
+                # Re-evaluate the live order after every wakeup. Fixed predecessor
+                # tasks cannot represent edits to the FIFO (and can deadlock).
+                while True:
+                    waiting = [rid for rid in self._queued_run_inputs if self._run_lanes.get(rid) == lane]
+                    busy = any(rid != run_id and not task.done() and self._run_lanes.get(rid) == lane
+                               and rid not in self._queued_run_inputs for rid, task in self._active_run_tasks.items())
+                    if waiting and waiting[0] == run_id and not busy and self._concurrency_limited_response() is None:
+                        break
                     await asyncio.sleep(0.05)
-                self._queued_run_inputs.pop(run_id, None)
+                # Claim text and lane without yielding to HTTP controls.
+                user_message = self._queued_run_inputs.pop(run_id)
                 self._set_run_status(run_id, "running")
                 with self._profile_scope(request_profile):
                     conversation_history = await self._conversation_history_for_session(session_id)
@@ -1034,12 +1033,9 @@ async def _handle_runs(
                     **({"pending_steer": pending_steer} if pending_steer else {}),
                 )
         except asyncio.CancelledError:
-            self._run_idempotency_store.discard_queue_input(run_id)
-            self._set_run_status(
-                run_id,
-                "cancelled",
-                last_event="run.cancelled",
-            )
+            if self._run_statuses.get(run_id, {}).get("last_event") != "queue.steer_uncertain":
+                self._run_idempotency_store.discard_queue_input(run_id)
+                self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
             try:
                 _put_event_if_active({
                     "event": "run.cancelled",
@@ -1189,9 +1185,14 @@ async def _handle_list_runs(self, request, *, _api_server):
     for rid, item in records.items():
         status = self._durable_run_status(request, rid)
         if status is not None:
+            if status.get("status") in {"running", "waiting_for_approval", "stopping", "completed"}:
+                item = {"run_id": rid}
             result.append({**status, **item})
-    result.sort(key=lambda item: (item.get("created_at", 0), item["run_id"]))
-    return web.json_response({"runs": result})
+    for item in result:
+        if "queued_input" in item:
+            item["queue_revision"] = hashlib.sha256(item["queued_input"].encode()).hexdigest()
+    result.sort(key=lambda item: ("queued_input" in item, item.get("queue_position", item.get("created_at", 0)), item["run_id"]))
+    return web.json_response({"runs": result, "queue_controls": True})
 
 
 async def _handle_delete_queued_run(self, request, *, _api_server):

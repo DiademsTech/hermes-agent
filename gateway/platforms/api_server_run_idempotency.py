@@ -97,6 +97,10 @@ class RunIdempotencyStore:
         self._conn.execute("""CREATE TABLE IF NOT EXISTS run_queue_inputs (
             run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input TEXT NOT NULL
         )""")
+        queue_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(run_queue_inputs)")}
+        if "position" not in queue_columns:
+            self._conn.execute("ALTER TABLE run_queue_inputs ADD COLUMN position REAL NOT NULL DEFAULT 0")
+            self._conn.execute("UPDATE run_queue_inputs SET position=rowid")
         self._conn.commit()
         self._lock = threading.Lock()
         self._tighten_permissions()
@@ -186,7 +190,7 @@ class RunIdempotencyStore:
                 )
                 if queue_input is not None:
                     self._conn.execute(
-                        "INSERT INTO run_queue_inputs VALUES(?,?,?)",
+                        "INSERT INTO run_queue_inputs(run_id,session_id,input,position) VALUES(?,?,?,(SELECT COALESCE(MAX(position),0)+1 FROM run_queue_inputs))",
                         (run_id, status["session_id"], queue_input),
                     )
                 self._conn.commit()
@@ -204,12 +208,21 @@ class RunIdempotencyStore:
     def queue_inputs(self, scope: str, session_id: str) -> list[dict]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT q.run_id,q.input FROM run_queue_inputs q "
+                "SELECT q.run_id,q.input,q.position FROM run_queue_inputs q "
                 "JOIN run_idempotency r ON r.run_id=q.run_id "
-                "WHERE r.scope=? AND q.session_id=? ORDER BY r.created_at LIMIT 100",
+                "WHERE r.scope=? AND q.session_id=? ORDER BY q.position,r.created_at,q.run_id LIMIT 100",
                 (scope, session_id),
             ).fetchall()
-        return [{"run_id": row[0], "queued_input": row[1]} for row in rows]
+        return [{"run_id": row[0], "queued_input": row[1], "queue_position": row[2]} for row in rows]
+
+    def update_queue_input(self, run_id: str, text: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE run_queue_inputs SET input=? WHERE run_id=?", (text, run_id))
+
+    def reorder_queue_inputs(self, run_ids: list[str]) -> None:
+        with self._lock, self._conn:
+            positions = [self._conn.execute("SELECT position FROM run_queue_inputs WHERE run_id=?", (rid,)).fetchone()[0] for rid in run_ids]
+            self._conn.executemany("UPDATE run_queue_inputs SET position=? WHERE run_id=?", zip(sorted(positions), run_ids))
 
     def discard_queue_input(self, run_id: str) -> None:
         with self._lock:

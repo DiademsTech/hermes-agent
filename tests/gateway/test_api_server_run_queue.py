@@ -169,3 +169,120 @@ async def test_slow_initialization_does_not_block_queue_http(tmp_path):
             finally:
                 release.set()
             await settled(adapter, first['run_id'])
+
+@pytest.mark.asyncio
+async def test_queue_edit_reorder_and_steer_are_serialized_with_execution(tmp_path):
+    adapter = _make_adapter()
+    adapter._run_idempotency_store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    gate, started = threading.Event(), threading.Event()
+    calls, steers = [], []
+    def create(**kwargs):
+        agent = MagicMock()
+        agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+        def run(user_message, **kwargs):
+            calls.append(user_message)
+            if user_message == 'first':
+                started.set()
+                assert gate.wait(15)
+            return {'final_response': 'done'}
+        agent.run_conversation.side_effect = run
+        agent.steer.side_effect = lambda text: steers.append(text) or True
+        return agent
+    app = app_for(adapter)
+    app.router.add_patch('/v1/runs/queue', adapter._handle_reorder_queue)
+    app.router.add_patch('/v1/runs/{run_id}/queue', adapter._handle_edit_queued_run)
+    app.router.add_post('/v1/runs/{run_id}/queue/steer', adapter._handle_steer_queued_run)
+    async with TestClient(TestServer(app)) as client:
+        with patch.object(adapter, '_create_agent', side_effect=create), patch.object(adapter, '_conversation_history_for_session', AsyncMock(return_value=[])):
+            async def post(text):
+                r = await client.post('/v1/runs', json={'input':text,'session_id':'one','queue':True}, headers={'Idempotency-Key':text})
+                assert r.status == 202
+                return (await r.json())['run_id']
+            async def rows():
+                data = await (await client.get('/v1/runs?session_id=one')).json()
+                return [row for row in data['runs'] if 'queued_input' in row]
+            first = await post('first')
+            assert await asyncio.to_thread(started.wait, 3)
+            try:
+                b, c, d = await post('b'), await post('c'), await post('d')
+                snapshot = await rows()
+                assert [r['run_id'] for r in snapshot] == [b,c,d]
+                revision = snapshot[0]['queue_revision']
+                assert (await client.patch(f'/v1/runs/{first}/queue', json={'input':'no','expected_revision':revision})).status == 409
+                assert (await client.patch(f'/v1/runs/{b}/queue', json={'input':'edited b','expected_revision':revision})).status == 200
+                assert (await client.patch(f'/v1/runs/{b}/queue', json={'input':'stale','expected_revision':revision})).status == 409
+                assert (await client.patch('/v1/runs/queue', json={'session_id':'one','order':[d,c,b],'expected_order':[b,c,d]})).status == 200
+                assert (await client.patch('/v1/runs/queue', json={'session_id':'one','order':[b,c,d],'expected_order':[b,c,d]})).status == 409
+                assert [r['run_id'] for r in await rows()] == [d,c,b]
+                assert [r['run_id'] for r in adapter._run_idempotency_store.queue_inputs(adapter._run_owners[b], 'one')] == [d,c,b]
+                c_row = next(r for r in await rows() if r['run_id']==c)
+                payload = {'expected_revision':c_row['queue_revision']}
+                adapter._active_run_agents[first].steer.side_effect = lambda text: False
+                assert (await client.post(f'/v1/runs/{c}/queue/steer', json=payload)).status == 409
+                assert any(r['run_id']==c for r in await rows())
+                adapter._active_run_agents[first].steer.side_effect = lambda text: steers.append(text) or True
+                assert (await client.post(f'/v1/runs/{c}/queue/steer', json=payload)).status == 200
+                assert (await client.post(f'/v1/runs/{c}/queue/steer', json=payload)).status == 409
+                assert steers == ['c']
+                assert [r['run_id'] for r in await rows()] == [d,b]
+            finally:
+                gate.set()
+            await settled(adapter, b)
+            assert calls == ['first','d','edited b']
+            assert await rows() == []
+
+@pytest.mark.asyncio
+async def test_queue_control_auth_scope_and_ambiguous_steer(tmp_path):
+    from types import SimpleNamespace
+    adapter = _make_adapter(api_key='secret')
+    adapter._run_idempotency_store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
+    gate, started = threading.Event(), threading.Event()
+    def create(**kwargs):
+        agent=MagicMock()
+        agent.session_prompt_tokens=agent.session_completion_tokens=agent.session_total_tokens=0
+        def run(**kwargs):
+            started.set()
+            assert gate.wait(15)
+            return {'final_response':'done'}
+        agent.run_conversation.side_effect=run
+        agent.steer.side_effect=RuntimeError('ambiguous')
+        return agent
+    app=app_for(adapter)
+    app.router.add_patch('/v1/runs/queue', adapter._handle_reorder_queue)
+    app.router.add_patch('/v1/runs/{run_id}/queue', adapter._handle_edit_queued_run)
+    app.router.add_post('/v1/runs/{run_id}/queue/steer', adapter._handle_steer_queued_run)
+    headers={'Authorization':'Bearer secret'}
+    async with TestClient(TestServer(app)) as client:
+        with patch.object(adapter,'_create_agent',side_effect=create), patch.object(adapter,'_conversation_history_for_session',AsyncMock(return_value=[])):
+            first=await client.post('/v1/runs',headers=headers,json={'input':'first','session_id':'one'})
+            first_id=(await first.json())['run_id']
+            assert await asyncio.to_thread(started.wait,3)
+            try:
+                r=await client.post('/v1/runs',headers={**headers,'Idempotency-Key':'next'},json={'input':'next','session_id':'one','queue':True})
+                rid=(await r.json())['run_id']
+                rows=(await (await client.get('/v1/runs?session_id=one',headers=headers)).json())['runs']
+                revision=next(row['queue_revision'] for row in rows if row['run_id']==rid)
+                payload={'expected_revision':revision}
+                assert (await client.patch(f'/v1/runs/{rid}/queue',json={**payload,'input':'x'})).status==401
+                assert (await client.post(f'/v1/runs/{rid}/queue/steer',json=payload)).status==401
+                assert (await client.patch('/v1/runs/queue',headers=headers,json={'session_id':'other','order':[rid],'expected_order':[rid]})).status==409
+                assert (await client.post(f'/v1/runs/{rid}/queue/steer',headers=headers,json=payload)).status==503
+                await settled(adapter,rid)
+                rows=(await (await client.get('/v1/runs?session_id=one',headers=headers)).json())['runs']
+                retained=next(row for row in rows if row['run_id']==rid)
+                assert retained['status']=='interrupted' and retained['queued_input']=='next'
+                assert (await client.post(f'/v1/runs/{rid}/queue/steer',headers=headers,json=payload)).status==409
+                assert adapter._active_run_agents[first_id].steer.call_count==1
+            finally:
+                gate.set()
+            await settled(adapter,first_id)
+
+
+def test_queue_order_is_independent_of_wall_clock(tmp_path):
+    store=RunIdempotencyStore(str(tmp_path/'runs.db'))
+    with patch('gateway.platforms.api_server_run_idempotency.time.time',return_value=123):
+        for rid in ['z','a','m']:
+            store.reserve('scope',rid,rid,rid,{'run_id':rid,'session_id':'s','status':'queued','created_at':123},queue_input=rid)
+    assert [row['run_id'] for row in store.queue_inputs('scope','s')]==['z','a','m']
+    store.reorder_queue_inputs(['m','z','a'])
+    assert [row['run_id'] for row in RunIdempotencyStore(str(tmp_path/'runs.db')).queue_inputs('scope','s')]==['m','z','a']
