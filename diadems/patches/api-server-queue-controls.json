@@ -1,0 +1,15 @@
+{
+  "id": "api-server-queue-controls",
+  "release_base": "36e6e5468118f5c0f8a3855b944c60d2e21f87eb",
+  "release_commit": "943ba24865b2490ca2b23a2f90ec0f3acb79f52e",
+  "capability": "run_queue_controls",
+  "status": "release_delta_tracked_forward_port_required",
+  "upstream_base": "872bafd58d21727a63b4e179000dc3afec2742c4",
+  "patch": "api-server-queue-controls.patch",
+  "tests": [
+    "tests/gateway/test_api_server_run_queue.py",
+    "tests/gateway/test_api_server_runs.py",
+    "tests/gateway/test_api_server_run_idempotency.py"
+  ],
+  "retire_when": "An approved upstream release provides equivalent queued editing, ordering and steering contracts."
+}

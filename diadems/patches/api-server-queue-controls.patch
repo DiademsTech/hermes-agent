@@ -1,0 +1,449 @@
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index b3d8dec5206..a55e1ade532 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -3355,6 +3355,7 @@ class APIServerAdapter(BasePlatformAdapter):
+                 "run_stop": True,
+                 "run_steer": True,
+                 "run_queue": True,
++                "run_queue_controls": True,
+                 "run_approval_response": True,
+                 "tool_progress_events": True,
+                 "approval_events": True,
+@@ -7678,6 +7679,18 @@ class APIServerAdapter(BasePlatformAdapter):
+     async def _handle_delete_queued_run(self, request: "web.Request") -> "web.Response":
+         return await _api_runs._handle_delete_queued_run(self, request, _api_server=sys.modules[__name__])
+ 
++    async def _handle_edit_queued_run(self, request):
++        from .api_server_queue_controls import edit_queue
++        return await edit_queue(self, request)
++
++    async def _handle_reorder_queue(self, request):
++        from .api_server_queue_controls import reorder_queue
++        return await reorder_queue(self, request)
++
++    async def _handle_steer_queued_run(self, request):
++        from .api_server_queue_controls import steer_queue
++        return await steer_queue(self, request)
++
+     async def _handle_run_events(self, request: "web.Request") -> "web.StreamResponse":
+         """GET /v1/runs/{run_id}/events — stream structured lifecycle events."""
+         return await _api_runs._handle_run_events(
+diff --git a/gateway/platforms/api_server_queue_controls.py b/gateway/platforms/api_server_queue_controls.py
+new file mode 100644
+index 00000000000..6e102ac8214
+--- /dev/null
++++ b/gateway/platforms/api_server_queue_controls.py
+@@ -0,0 +1,116 @@
++"""Session FIFO controls, serialized with admission on the API event loop.
++
++No await is allowed between validating a waiting item and changing it. The
++executor can finish concurrently, but only the event loop can claim the next
++input. Text revisions and expected order prevent stale devices overwriting it.
++"""
++import hashlib
++import time
++from contextlib import suppress
++
++from aiohttp import web
++
++
++def error(message, status=409):
++    return web.json_response({"error": {"message": message, "code": "queue_conflict"}}, status=status)
++
++
++async def body_for(adapter, request):
++    denied = adapter._check_auth(request)
++    if denied:
++        return None, denied
++    if adapter._room_grant_token(request):
++        return None, error("Session credential required", 403)
++    return await adapter._read_json_body(request)
++
++
++def waiting_item(adapter, request, body):
++    rid = request.match_info["run_id"]
++    if not adapter._request_owns_run(request, rid):
++        return None, error("Run not found", 404)
++    status = adapter._durable_run_status(request, rid) or {}
++    text = adapter._queued_run_inputs.get(rid)
++    if status.get("status") != "queued" or text is None or rid in adapter._stopping_run_ids:
++        return None, error("Message already left the queue")
++    if body.get("expected_revision") != hashlib.sha256(text.encode()).hexdigest():
++        return None, error("Message changed on another device")
++    return rid, None
++
++
++async def edit_queue(adapter, request):
++    body, denied = await body_for(adapter, request)
++    if denied is not None:
++        return denied
++    text = body.get("input")
++    if not isinstance(text, str) or not text.strip() or len(text) > 250_000:
++        return error("Non-empty input up to 250000 characters required", 400)
++    rid, denied = waiting_item(adapter, request, body)
++    if denied is not None:
++        return denied
++    adapter._run_idempotency_store.update_queue_input(rid, text)
++    adapter._queued_run_inputs[rid] = text
++    return web.json_response({"run_id": rid, "queue_revision": hashlib.sha256(text.encode()).hexdigest()})
++
++
++async def reorder_queue(adapter, request):
++    body, denied = await body_for(adapter, request)
++    if denied is not None:
++        return denied
++    sid, order, expected = body.get("session_id"), body.get("order"), body.get("expected_order")
++    if not isinstance(sid, str) or not isinstance(order, list) or not isinstance(expected, list) or not all(isinstance(rid, str) for rid in order + expected):
++        return error("Session and ordered run ids required", 400)
++    current = [rid for rid in adapter._queued_run_inputs
++               if adapter._request_owns_run(request, rid)
++               and adapter._run_statuses.get(rid, {}).get("session_id") == sid
++               and adapter._run_statuses[rid].get("status") == "queued"
++               and rid not in adapter._stopping_run_ids]
++    if current != expected or len(order) != len(current) or set(order) != set(current):
++        return error("Queue changed on another device")
++    adapter._run_idempotency_store.reorder_queue_inputs(order)
++    # Preserve the relative order of every other profile/session.
++    iterator = iter(order)
++    keys = [next(iterator) if rid in current else rid for rid in adapter._queued_run_inputs]
++    adapter._queued_run_inputs = {rid: adapter._queued_run_inputs[rid] for rid in keys}
++    return web.json_response({"order": order})
++
++
++async def steer_queue(adapter, request):
++    body, denied = await body_for(adapter, request)
++    if denied is not None:
++        return denied
++    rid, denied = waiting_item(adapter, request, body)
++    if denied is not None:
++        return denied
++    lane = adapter._run_lanes[rid]
++    target = next((key for key, agent in adapter._active_run_agents.items()
++                   if adapter._run_lanes.get(key) == lane and adapter._request_owns_run(request, key)
++                   and adapter._run_statuses.get(key, {}).get("status") == "running"
++                   and callable(getattr(agent, "steer", None))), None)
++    if target is None:
++        return error("No running turn accepts steering; message remains queued")
++    # Persist the claim before handing off: after a process crash the input
++    # stays interrupted for manual recovery, never automatically delivered twice.
++    adapter._set_run_status(rid, "stopping", last_event="queue.steering")
++    try:
++        accepted = bool(adapter._active_run_agents[target].steer(adapter._queued_run_inputs[rid]))
++    except Exception:
++        # Outcome is ambiguous. Retain text, but prevent FIFO execution/retry.
++        adapter._queued_run_inputs.pop(rid, None)
++        adapter._stopping_run_ids.add(rid)
++        adapter._set_run_status(rid, "interrupted", last_event="queue.steer_uncertain")
++        adapter._active_run_tasks[rid].cancel()
++        return error("Steering outcome uncertain; do not automatically retry", 503)
++    if not accepted:
++        adapter._set_run_status(rid, "queued", last_event="queue.steer_rejected")
++        return error("Run declined steering; message remains queued")
++    adapter._run_idempotency_store.discard_queue_input(rid)
++    adapter._queued_run_inputs.pop(rid, None)
++    adapter._stopping_run_ids.add(rid)
++    adapter._set_run_status(rid, "cancelled", last_event="queue.steered", steered_to=target)
++    adapter._active_run_tasks[rid].cancel()
++    adapter._set_run_status(target, "running", last_event="run.steered")
++    stream = adapter._run_streams.get(target)
++    if stream is not None:
++        with suppress(Exception):
++            stream.put_nowait({"event": "run.steered", "run_id": target, "timestamp": time.time(), "accepted": True})
++    return web.json_response({"run_id": rid, "steered_to": target, "accepted": True})
+diff --git a/gateway/platforms/api_server_run_idempotency.py b/gateway/platforms/api_server_run_idempotency.py
+index d416f13bc11..184060831b5 100644
+--- a/gateway/platforms/api_server_run_idempotency.py
++++ b/gateway/platforms/api_server_run_idempotency.py
+@@ -97,6 +97,10 @@ class RunIdempotencyStore:
+         self._conn.execute("""CREATE TABLE IF NOT EXISTS run_queue_inputs (
+             run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input TEXT NOT NULL
+         )""")
++        queue_columns = {row[1] for row in self._conn.execute("PRAGMA table_info(run_queue_inputs)")}
++        if "position" not in queue_columns:
++            self._conn.execute("ALTER TABLE run_queue_inputs ADD COLUMN position REAL NOT NULL DEFAULT 0")
++            self._conn.execute("UPDATE run_queue_inputs SET position=rowid")
+         self._conn.commit()
+         self._lock = threading.Lock()
+         self._tighten_permissions()
+@@ -186,7 +190,7 @@ class RunIdempotencyStore:
+                 )
+                 if queue_input is not None:
+                     self._conn.execute(
+-                        "INSERT INTO run_queue_inputs VALUES(?,?,?)",
++                        "INSERT INTO run_queue_inputs(run_id,session_id,input,position) VALUES(?,?,?,(SELECT COALESCE(MAX(position),0)+1 FROM run_queue_inputs))",
+                         (run_id, status["session_id"], queue_input),
+                     )
+                 self._conn.commit()
+@@ -204,12 +208,21 @@ class RunIdempotencyStore:
+     def queue_inputs(self, scope: str, session_id: str) -> list[dict]:
+         with self._lock:
+             rows = self._conn.execute(
+-                "SELECT q.run_id,q.input FROM run_queue_inputs q "
++                "SELECT q.run_id,q.input,q.position FROM run_queue_inputs q "
+                 "JOIN run_idempotency r ON r.run_id=q.run_id "
+-                "WHERE r.scope=? AND q.session_id=? ORDER BY r.created_at LIMIT 100",
++                "WHERE r.scope=? AND q.session_id=? ORDER BY q.position,r.created_at,q.run_id LIMIT 100",
+                 (scope, session_id),
+             ).fetchall()
+-        return [{"run_id": row[0], "queued_input": row[1]} for row in rows]
++        return [{"run_id": row[0], "queued_input": row[1], "queue_position": row[2]} for row in rows]
++
++    def update_queue_input(self, run_id: str, text: str) -> None:
++        with self._lock, self._conn:
++            self._conn.execute("UPDATE run_queue_inputs SET input=? WHERE run_id=?", (text, run_id))
++
++    def reorder_queue_inputs(self, run_ids: list[str]) -> None:
++        with self._lock, self._conn:
++            positions = [self._conn.execute("SELECT position FROM run_queue_inputs WHERE run_id=?", (rid,)).fetchone()[0] for rid in run_ids]
++            self._conn.executemany("UPDATE run_queue_inputs SET position=? WHERE run_id=?", zip(sorted(positions), run_ids))
+ 
+     def discard_queue_input(self, run_id: str) -> None:
+         with self._lock:
+diff --git a/gateway/platforms/api_server_runs.py b/gateway/platforms/api_server_runs.py
+index 00e63f478d8..eae28b27bca 100644
+--- a/gateway/platforms/api_server_runs.py
++++ b/gateway/platforms/api_server_runs.py
+@@ -71,8 +71,8 @@ def _initialize_run_state(self, *, store_factory) -> None:
+     # Active run agent/task references for stop support
+     self._active_run_agents: Dict[str, Any] = {}
+     self._active_run_tasks: Dict[str, "asyncio.Task"] = {}
+-    # Per-profile/session FIFO admission. Request bodies remain process-local;
+-    # the durable idempotency store continues to contain only status/handles.
++    # Per-profile/session FIFO admission. Only unconsumed queue text is durable
++    # in the capsule; provider configuration and live objects stay process-local.
+     self._run_lanes: Dict[str, tuple[str, str]] = {}
+     self._deleting_run_sessions: set[tuple[str, str]] = set()
+     self._queued_run_inputs: Dict[str, str] = {}
+@@ -91,6 +91,9 @@ def _http_routes(self) -> list[tuple[str, str, Any]]:
+         ("POST", "/v1/runs", self._handle_runs),
+         ("GET", "/v1/runs", self._handle_list_runs),
+         ("DELETE", "/v1/runs/{run_id}/queue", self._handle_delete_queued_run),
++        ("PATCH", "/v1/runs/queue", self._handle_reorder_queue),
++        ("PATCH", "/v1/runs/{run_id}/queue", self._handle_edit_queued_run),
++        ("POST", "/v1/runs/{run_id}/queue/steer", self._handle_steer_queued_run),
+         ("GET", "/v1/runs/{run_id}", self._handle_get_run),
+         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
+         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
+@@ -763,24 +766,20 @@ async def _handle_runs(
+     )
+ 
+     async def _run_and_close():
+-        nonlocal conversation_history
++        nonlocal conversation_history, user_message
+         try:
+             if queue_mode:
+-                # Await every predecessor: cancelling a middle queued item
+-                # must never let its successor overtake a still-running turn.
+-                for predecessor in predecessors:
+-                    try:
+-                        await asyncio.shield(predecessor)
+-                    except asyncio.CancelledError:
+-                        if asyncio.current_task().cancelling():
+-                            raise
+-                    except Exception:
+-                        pass  # A failed turn does not discard later messages.
+-                # Another session may have occupied the released slot first.
+-                # Claim it without an await between checking and marking running.
+-                while self._concurrency_limited_response() is not None:
++                # Re-evaluate the live order after every wakeup. Fixed predecessor
++                # tasks cannot represent edits to the FIFO (and can deadlock).
++                while True:
++                    waiting = [rid for rid in self._queued_run_inputs if self._run_lanes.get(rid) == lane]
++                    busy = any(rid != run_id and not task.done() and self._run_lanes.get(rid) == lane
++                               and rid not in self._queued_run_inputs for rid, task in self._active_run_tasks.items())
++                    if waiting and waiting[0] == run_id and not busy and self._concurrency_limited_response() is None:
++                        break
+                     await asyncio.sleep(0.05)
+-                self._queued_run_inputs.pop(run_id, None)
++                # Claim text and lane without yielding to HTTP controls.
++                user_message = self._queued_run_inputs.pop(run_id)
+                 self._set_run_status(run_id, "running")
+                 with self._profile_scope(request_profile):
+                     conversation_history = await self._conversation_history_for_session(session_id)
+@@ -1034,12 +1033,9 @@ async def _handle_runs(
+                     **({"pending_steer": pending_steer} if pending_steer else {}),
+                 )
+         except asyncio.CancelledError:
+-            self._run_idempotency_store.discard_queue_input(run_id)
+-            self._set_run_status(
+-                run_id,
+-                "cancelled",
+-                last_event="run.cancelled",
+-            )
++            if self._run_statuses.get(run_id, {}).get("last_event") != "queue.steer_uncertain":
++                self._run_idempotency_store.discard_queue_input(run_id)
++                self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
+             try:
+                 _put_event_if_active({
+                     "event": "run.cancelled",
+@@ -1189,9 +1185,14 @@ async def _handle_list_runs(self, request, *, _api_server):
+     for rid, item in records.items():
+         status = self._durable_run_status(request, rid)
+         if status is not None:
++            if status.get("status") in {"running", "waiting_for_approval", "stopping", "completed"}:
++                item = {"run_id": rid}
+             result.append({**status, **item})
+-    result.sort(key=lambda item: (item.get("created_at", 0), item["run_id"]))
+-    return web.json_response({"runs": result})
++    for item in result:
++        if "queued_input" in item:
++            item["queue_revision"] = hashlib.sha256(item["queued_input"].encode()).hexdigest()
++    result.sort(key=lambda item: ("queued_input" in item, item.get("queue_position", item.get("created_at", 0)), item["run_id"]))
++    return web.json_response({"runs": result, "queue_controls": True})
+ 
+ 
+ async def _handle_delete_queued_run(self, request, *, _api_server):
+diff --git a/tests/gateway/test_api_server_run_queue.py b/tests/gateway/test_api_server_run_queue.py
+index feaddaa3269..f87810a1272 100644
+--- a/tests/gateway/test_api_server_run_queue.py
++++ b/tests/gateway/test_api_server_run_queue.py
+@@ -169,3 +169,120 @@ async def test_slow_initialization_does_not_block_queue_http(tmp_path):
+             finally:
+                 release.set()
+             await settled(adapter, first['run_id'])
++
++@pytest.mark.asyncio
++async def test_queue_edit_reorder_and_steer_are_serialized_with_execution(tmp_path):
++    adapter = _make_adapter()
++    adapter._run_idempotency_store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
++    gate, started = threading.Event(), threading.Event()
++    calls, steers = [], []
++    def create(**kwargs):
++        agent = MagicMock()
++        agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
++        def run(user_message, **kwargs):
++            calls.append(user_message)
++            if user_message == 'first':
++                started.set()
++                assert gate.wait(15)
++            return {'final_response': 'done'}
++        agent.run_conversation.side_effect = run
++        agent.steer.side_effect = lambda text: steers.append(text) or True
++        return agent
++    app = app_for(adapter)
++    app.router.add_patch('/v1/runs/queue', adapter._handle_reorder_queue)
++    app.router.add_patch('/v1/runs/{run_id}/queue', adapter._handle_edit_queued_run)
++    app.router.add_post('/v1/runs/{run_id}/queue/steer', adapter._handle_steer_queued_run)
++    async with TestClient(TestServer(app)) as client:
++        with patch.object(adapter, '_create_agent', side_effect=create), patch.object(adapter, '_conversation_history_for_session', AsyncMock(return_value=[])):
++            async def post(text):
++                r = await client.post('/v1/runs', json={'input':text,'session_id':'one','queue':True}, headers={'Idempotency-Key':text})
++                assert r.status == 202
++                return (await r.json())['run_id']
++            async def rows():
++                data = await (await client.get('/v1/runs?session_id=one')).json()
++                return [row for row in data['runs'] if 'queued_input' in row]
++            first = await post('first')
++            assert await asyncio.to_thread(started.wait, 3)
++            try:
++                b, c, d = await post('b'), await post('c'), await post('d')
++                snapshot = await rows()
++                assert [r['run_id'] for r in snapshot] == [b,c,d]
++                revision = snapshot[0]['queue_revision']
++                assert (await client.patch(f'/v1/runs/{first}/queue', json={'input':'no','expected_revision':revision})).status == 409
++                assert (await client.patch(f'/v1/runs/{b}/queue', json={'input':'edited b','expected_revision':revision})).status == 200
++                assert (await client.patch(f'/v1/runs/{b}/queue', json={'input':'stale','expected_revision':revision})).status == 409
++                assert (await client.patch('/v1/runs/queue', json={'session_id':'one','order':[d,c,b],'expected_order':[b,c,d]})).status == 200
++                assert (await client.patch('/v1/runs/queue', json={'session_id':'one','order':[b,c,d],'expected_order':[b,c,d]})).status == 409
++                assert [r['run_id'] for r in await rows()] == [d,c,b]
++                assert [r['run_id'] for r in adapter._run_idempotency_store.queue_inputs(adapter._run_owners[b], 'one')] == [d,c,b]
++                c_row = next(r for r in await rows() if r['run_id']==c)
++                payload = {'expected_revision':c_row['queue_revision']}
++                adapter._active_run_agents[first].steer.side_effect = lambda text: False
++                assert (await client.post(f'/v1/runs/{c}/queue/steer', json=payload)).status == 409
++                assert any(r['run_id']==c for r in await rows())
++                adapter._active_run_agents[first].steer.side_effect = lambda text: steers.append(text) or True
++                assert (await client.post(f'/v1/runs/{c}/queue/steer', json=payload)).status == 200
++                assert (await client.post(f'/v1/runs/{c}/queue/steer', json=payload)).status == 409
++                assert steers == ['c']
++                assert [r['run_id'] for r in await rows()] == [d,b]
++            finally:
++                gate.set()
++            await settled(adapter, b)
++            assert calls == ['first','d','edited b']
++            assert await rows() == []
++
++@pytest.mark.asyncio
++async def test_queue_control_auth_scope_and_ambiguous_steer(tmp_path):
++    from types import SimpleNamespace
++    adapter = _make_adapter(api_key='secret')
++    adapter._run_idempotency_store = RunIdempotencyStore(str(tmp_path / 'runs.db'))
++    gate, started = threading.Event(), threading.Event()
++    def create(**kwargs):
++        agent=MagicMock()
++        agent.session_prompt_tokens=agent.session_completion_tokens=agent.session_total_tokens=0
++        def run(**kwargs):
++            started.set()
++            assert gate.wait(15)
++            return {'final_response':'done'}
++        agent.run_conversation.side_effect=run
++        agent.steer.side_effect=RuntimeError('ambiguous')
++        return agent
++    app=app_for(adapter)
++    app.router.add_patch('/v1/runs/queue', adapter._handle_reorder_queue)
++    app.router.add_patch('/v1/runs/{run_id}/queue', adapter._handle_edit_queued_run)
++    app.router.add_post('/v1/runs/{run_id}/queue/steer', adapter._handle_steer_queued_run)
++    headers={'Authorization':'Bearer secret'}
++    async with TestClient(TestServer(app)) as client:
++        with patch.object(adapter,'_create_agent',side_effect=create), patch.object(adapter,'_conversation_history_for_session',AsyncMock(return_value=[])):
++            first=await client.post('/v1/runs',headers=headers,json={'input':'first','session_id':'one'})
++            first_id=(await first.json())['run_id']
++            assert await asyncio.to_thread(started.wait,3)
++            try:
++                r=await client.post('/v1/runs',headers={**headers,'Idempotency-Key':'next'},json={'input':'next','session_id':'one','queue':True})
++                rid=(await r.json())['run_id']
++                rows=(await (await client.get('/v1/runs?session_id=one',headers=headers)).json())['runs']
++                revision=next(row['queue_revision'] for row in rows if row['run_id']==rid)
++                payload={'expected_revision':revision}
++                assert (await client.patch(f'/v1/runs/{rid}/queue',json={**payload,'input':'x'})).status==401
++                assert (await client.post(f'/v1/runs/{rid}/queue/steer',json=payload)).status==401
++                assert (await client.patch('/v1/runs/queue',headers=headers,json={'session_id':'other','order':[rid],'expected_order':[rid]})).status==409
++                assert (await client.post(f'/v1/runs/{rid}/queue/steer',headers=headers,json=payload)).status==503
++                await settled(adapter,rid)
++                rows=(await (await client.get('/v1/runs?session_id=one',headers=headers)).json())['runs']
++                retained=next(row for row in rows if row['run_id']==rid)
++                assert retained['status']=='interrupted' and retained['queued_input']=='next'
++                assert (await client.post(f'/v1/runs/{rid}/queue/steer',headers=headers,json=payload)).status==409
++                assert adapter._active_run_agents[first_id].steer.call_count==1
++            finally:
++                gate.set()
++            await settled(adapter,first_id)
++
++
++def test_queue_order_is_independent_of_wall_clock(tmp_path):
++    store=RunIdempotencyStore(str(tmp_path/'runs.db'))
++    with patch('gateway.platforms.api_server_run_idempotency.time.time',return_value=123):
++        for rid in ['z','a','m']:
++            store.reserve('scope',rid,rid,rid,{'run_id':rid,'session_id':'s','status':'queued','created_at':123},queue_input=rid)
++    assert [row['run_id'] for row in store.queue_inputs('scope','s')]==['z','a','m']
++    store.reorder_queue_inputs(['m','z','a'])
++    assert [row['run_id'] for row in RunIdempotencyStore(str(tmp_path/'runs.db')).queue_inputs('scope','s')]==['m','z','a']
+diff --git a/website/docs/user-guide/features/api-server.md b/website/docs/user-guide/features/api-server.md
+index 6fb67083341..d544d3584ff 100644
+--- a/website/docs/user-guide/features/api-server.md
++++ b/website/docs/user-guide/features/api-server.md
+@@ -467,6 +467,23 @@ including a completed turn. `DELETE /v1/runs/{run_id}/queue` cancels only waitin
+ work and returns 409 if it has started; `/stop` remains the explicit interruption
+ action. Run-scoped room grants cannot enumerate or submit a session queue.
+ 
++When `features.run_queue_controls` is true, listing also returns a
++`queue_revision` for each unconsumed input. Running inputs are no longer listed
++as queued, even while recovery data is retained internally.
++
++- `PATCH /v1/runs/{run_id}/queue` accepts `input` and `expected_revision`.
++- `PATCH /v1/runs/queue` accepts `session_id`, `order` and `expected_order`
++  (complete ordered lists of waiting run IDs).
++- `POST /v1/runs/{run_id}/queue/steer` accepts `expected_revision` and transfers
++  that input to a running turn in the same session/profile. If steering is
++  refused, the input stays queued; accepted steering removes it from the FIFO.
++
++Controls require a session credential. They reject stale revisions, changed
++orders and already claimed inputs with HTTP 409. No client should automatically
++retry an ambiguous steering response: a crash during handoff leaves recovery
++text interrupted rather than executing it a second time. Editing and ordering
++are durable in the capsule; neither changes the already executed transcript.
++
+ Queued inputs are stored in the capsule's private run database, separately from
+ status reservations, until execution begins. Closing an HTTP/SSE connection
+ does not cancel work. A gateway restart marks unfinished admissions interrupted;
