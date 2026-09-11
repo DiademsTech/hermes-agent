@@ -3353,6 +3353,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_status": True,
                 "run_events_sse": True,
                 "run_events_memory_recall": True,
+                "run_events_memory_recall_details": True,
                 "run_stop": True,
                 "run_steer": True,
                 "run_queue": True,

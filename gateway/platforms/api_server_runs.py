@@ -201,12 +201,32 @@ def _make_run_event_callback(
             if phase not in {"started", "completed", "failed"}:
                 return
             count = kwargs.get("count")
-            _push({
+            event = {
                 "event": "memory.recall", "run_id": run_id, "timestamp": ts,
                 "phase": phase,
                 "returned": kwargs.get("returned") is True,
                 "count": count if type(count) is int and count > 0 else None,
-            })
+            }
+            memories = kwargs.get("memories")
+            if phase == "completed" and event["returned"] and isinstance(memories, (list, tuple)):
+                # Only the provider's discrete receipt, never the formatted
+                # context (which also contains private prompt instructions).
+                if all(isinstance(text, str) for text in memories):
+                    remaining = 65536
+                    details = []
+                    redacted = False
+                    truncated = len(memories) > 64
+                    for text in memories[:64]:
+                        safe = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+                        redacted = redacted or safe != text
+                        if len(safe) > remaining:
+                            truncated = True
+                        if remaining <= 0:
+                            break
+                        details.append(safe[:remaining])
+                        remaining -= len(details[-1])
+                    event.update(memories=details, details_truncated=truncated, details_redacted=redacted)
+            _push(event)
         elif event_type == "tool.started":
             _push({
                 "event": "tool.started",

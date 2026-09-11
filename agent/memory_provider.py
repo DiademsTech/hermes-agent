@@ -68,6 +68,9 @@ class RecallStatus:
     provider_label: str
     count: int
     glyph: str = INDICATOR_GLYPH
+    # Exact discrete texts injected this turn, excluding prompt scaffolding.
+    # None means this provider does not expose a display receipt.
+    memories: tuple[str, ...] | None = None
 
 
 # Prompts that carry no semantic signal — trivial acknowledgements, greetings,

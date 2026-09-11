@@ -601,12 +601,12 @@ class MemoryManager:
         if not clean_query:
             return ""
 
-        def report(phase, *, returned=False, count=None):
-            # Display telemetry only: never expose the query, prompt or memory
-            # contents, and never let a disconnected client affect recall.
+        def report(phase, *, returned=False, count=None, memories=None):
+            # Display receipt only: no query or prompt scaffolding. A disconnected
+            # client must never affect recall or cause a second search.
             if event_callback:
                 try:
-                    event_callback("memory.recall", phase=phase, returned=returned, count=count)
+                    event_callback("memory.recall", phase=phase, returned=returned, count=count, memories=memories)
                 except Exception:
                     logger.debug("Memory recall event delivery failed", exc_info=True)
 
@@ -622,16 +622,18 @@ class MemoryManager:
                 if external:
                     returned = bool(result and result.strip())
                     count = None
+                    memories = None
                     if returned:
                         try:
                             status = provider.recall_status()
+                            memories = getattr(status, "memories", None)
                             if status and type(status.count) is int and status.count > 0:
                                 count = status.count
                         except Exception:
                             pass
                     # An empty return can also mean a timeout or disabled
                     # recall. It is not proof that a search found zero facts.
-                    report("completed", returned=returned, count=count)
+                    report("completed", returned=returned, count=count, memories=memories)
             except Exception as e:
                 if external:
                     report("failed")
