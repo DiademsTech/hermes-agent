@@ -1493,7 +1493,11 @@ def build_turn_context(
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             if not is_trivial_prompt(_query):
-                ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+                ext_prefetch_cache = agent._memory_manager.prefetch_all(
+                    # Runs uses the progress callback for structured events;
+                    # event_callback is the separate session lifecycle hook.
+                    _query, event_callback=getattr(agent, "tool_progress_callback", None)
+                ) or ""
         except Exception:
             pass
         # Deterministic, model-independent recall indicator: when memory was

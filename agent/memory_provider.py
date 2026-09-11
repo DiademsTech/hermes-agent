@@ -68,6 +68,9 @@ class RecallStatus:
     provider_label: str
     count: int
     glyph: str = INDICATOR_GLYPH
+    # Exact discrete texts injected this turn, excluding prompt scaffolding.
+    # None means this provider does not expose a display receipt.
+    memories: tuple[str, ...] | None = None
 
 
 # Prompts that carry no semantic signal — trivial acknowledgements, greetings,
@@ -209,6 +212,14 @@ class MemoryProvider(ABC):
         must reflect only the LAST prefetch — never a stale prior count.
         """
         return None
+
+    def recall_receipt(self) -> Optional[RecallStatus]:
+        """Describe the last injection for structured events, without a text indicator.
+
+        Providers may expose this even when their optional conversational
+        status line is disabled. Never run a second recall here.
+        """
+        return self.recall_status()
 
     def sync_turn(
         self,

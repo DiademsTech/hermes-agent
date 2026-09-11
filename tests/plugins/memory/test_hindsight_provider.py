@@ -841,6 +841,7 @@ class TestRecallStatus:
         assert status is not None
         assert status.provider_label == "Hindsight"
         assert status.count == 2
+        assert status.memories == ("Memory 1", "Memory 2")
 
     def test_reports_count_in_recall_sync_mode(self, provider_with_config):
         # recall_sync path does a live recall inside prefetch() (no background
@@ -850,6 +851,22 @@ class TestRecallStatus:
         status = p.recall_status()
         assert status is not None
         assert status.count == 2
+        assert status.memories == ("Memory 1", "Memory 2")
+
+    def test_receipt_is_exact_and_cleared_on_next_empty_sync_turn(self, provider_with_config):
+        p = provider_with_config(recall_sync=True, recall_prompt_preamble="PRIVATE PROMPT")
+        texts = ("First memory\nwith two lines", "Second memory <script>not HTML</script>")
+        p._client.arecall = AsyncMock(return_value=SimpleNamespace(
+            results=[SimpleNamespace(text=text) for text in texts]
+        ))
+        context = p.prefetch("private query")
+        assert p.recall_status().memories == texts
+        assert all(text in context for text in texts)
+        assert "PRIVATE PROMPT" not in str(p.recall_status().memories)
+        p._client.arecall = AsyncMock(return_value=SimpleNamespace(results=[]))
+        assert p.prefetch("next question") == ""
+        assert p.recall_status() is None
+        assert p._last_recall_memories == ()
 
     def test_none_when_recall_returned_nothing(self, provider):
         provider._client.arecall = AsyncMock(
@@ -888,6 +905,18 @@ class TestRecallStatus:
         # Memory was injected, but the indicator is turned off.
         assert p._last_recall_returned is True
         assert p.recall_status() is None
+
+    def test_structured_receipt_survives_disabled_text_indicator(self, provider_with_config):
+        from agent.memory_manager import MemoryManager
+        p = provider_with_config(recall_sync=True, recall_indicator=False)
+        manager = MemoryManager()
+        manager.add_provider(p)
+        events = []
+        context = manager.prefetch_all("Diadems", event_callback=lambda kind, **data: events.append(data))
+        assert "Memory 1" in context and "Memory 2" in context
+        assert manager.describe_recall() == ""
+        assert events[-1]["count"] == 2
+        assert events[-1]["memories"] == ("Memory 1", "Memory 2")
 
     def test_reflect_mode_reports_generic_count(self, provider_with_config):
         p = provider_with_config(recall_prefetch_method="reflect")

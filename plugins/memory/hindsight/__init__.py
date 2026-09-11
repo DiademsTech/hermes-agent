@@ -68,6 +68,7 @@ class _RecallResult:
 
     text: str
     count: int
+    memories: tuple[str, ...] = ()
 
 _DEFAULT_API_URL = "https://api.hindsight.vectorize.io"
 _DEFAULT_LOCAL_URL = "http://localhost:8888"
@@ -792,6 +793,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # _prefetch_result so the deterministic recall indicator can report an
         # accurate count without re-parsing the formatted text.
         self._prefetch_count = 0
+        self._prefetch_memories: tuple[str, ...] = ()
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread = None
         # State for the model-independent recall indicator (see recall_status()).
@@ -799,6 +801,7 @@ class HindsightMemoryProvider(MemoryProvider):
         # any memory to the agent this turn; _last_recall_count is how many.
         self._last_recall_returned = False
         self._last_recall_count = 0
+        self._last_recall_memories: tuple[str, ...] = ()
         self._recall_indicator = True
         # Deterministic retain indicator: emitted from sync_turn the moment a
         # retain is dispatched to the writer (see _emit_saving_indicator). Uses
@@ -1911,7 +1914,7 @@ class HindsightMemoryProvider(MemoryProvider):
             num_results = len(resp.results) if resp.results else 0
             logger.debug("Recall: returned %d results", num_results)
             text = "\n".join(f"- {r.text}" for r in resp.results if r.text) if resp.results else ""
-            return _RecallResult(text, num_results)
+            return _RecallResult(text, num_results, tuple(r.text for r in (resp.results or []) if r.text))
         except Exception as e:
             logger.debug("Hindsight recall failed: %s", e, exc_info=True)
             return _RecallResult("", 0)
@@ -1928,7 +1931,7 @@ class HindsightMemoryProvider(MemoryProvider):
         )
         return f"{header}\n\n{result}"
 
-    def _record_recall_indicator(self, *, returned: bool, count: int) -> None:
+    def _record_recall_indicator(self, *, returned: bool, count: int, memories: tuple[str, ...] = ()) -> None:
         """Track what the last prefetch injected, for recall_status().
 
         Cleared to "nothing" on empty turns so the indicator never reports a
@@ -1936,6 +1939,7 @@ class HindsightMemoryProvider(MemoryProvider):
         """
         self._last_recall_returned = returned
         self._last_recall_count = count if returned else 0
+        self._last_recall_memories = memories if returned else ()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         # Opt-in: recall synchronously against the *current* message so the
@@ -1946,7 +1950,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 self._record_recall_indicator(returned=False, count=0)
                 return ""
             recalled = self._do_recall(query)
-            self._record_recall_indicator(returned=bool(recalled.text), count=recalled.count)
+            self._record_recall_indicator(returned=bool(recalled.text), count=recalled.count, memories=recalled.memories)
             return self._format_recall(recalled.text)
 
         # Default: return the result the background worker prefetched for the
@@ -1957,9 +1961,11 @@ class HindsightMemoryProvider(MemoryProvider):
         with self._prefetch_lock:
             result = self._prefetch_result
             count = self._prefetch_count
+            memories = self._prefetch_memories
             self._prefetch_result = ""
             self._prefetch_count = 0
-        self._record_recall_indicator(returned=bool(result), count=count)
+            self._prefetch_memories = ()
+        self._record_recall_indicator(returned=bool(result), count=count, memories=memories)
         return self._format_recall(result)
 
     def recall_status(self) -> Optional[RecallStatus]:
@@ -1969,9 +1975,15 @@ class HindsightMemoryProvider(MemoryProvider):
         is turned off (``recall_indicator=false``), so customer-facing agents
         can suppress the "recalled N memories" status line.
         """
-        if not self._recall_indicator or not self._last_recall_returned:
+        if not self._recall_indicator:
             return None
-        return RecallStatus(provider_label="Hindsight", count=self._last_recall_count, glyph=_HINDSIGHT_GLYPH)
+        return self.recall_receipt()
+
+    def recall_receipt(self) -> Optional[RecallStatus]:
+        """Structured display receipt, independent of the textual indicator."""
+        if not self._last_recall_returned:
+            return None
+        return RecallStatus(provider_label="Hindsight", count=self._last_recall_count, glyph=_HINDSIGHT_GLYPH, memories=self._last_recall_memories or None)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         # In synchronous mode prefetch() does a live recall each turn, so
@@ -1996,6 +2008,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 with self._prefetch_lock:
                     self._prefetch_result = recalled.text
                     self._prefetch_count = recalled.count
+                    self._prefetch_memories = recalled.memories
 
         self._prefetch_thread = threading.Thread(target=_run, daemon=True, name="hindsight-prefetch")
         self._prefetch_thread.start()

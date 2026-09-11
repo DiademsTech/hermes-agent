@@ -214,6 +214,22 @@ def test_returns_turn_context_with_user_message_appended():
     assert ctx.active_system_prompt == "SYSTEM"
 
 
+def test_recall_reaches_runs_progress_callback_without_lifecycle_hook():
+    from agent.memory_manager import MemoryManager
+    from tests.agent.test_memory_recall_events import Provider
+
+    agent = _FakeAgent()
+    agent.event_callback = None
+    events = []
+    agent.tool_progress_callback = lambda kind, **data: events.append((kind, data))
+    agent._memory_manager = MemoryManager()
+    agent._memory_manager.add_provider(Provider())
+    _build(agent, user_message="What do you remember about the Diadems project?")
+    assert [event[1]["phase"] for event in events] == ["started", "completed"]
+    assert events[-1][0] == "memory.recall"
+    assert events[-1][1]["memories"] == ("private recalled content",)
+
+
 def test_preflight_timeout_stops_turn_before_provider_boundary():
     """An unchanged oversized payload must not escape turn construction."""
     agent = _FakeAgent()
@@ -286,9 +302,10 @@ def test_prefetch_skipped_for_trivial_user_message():
 
 def test_prefetch_runs_for_substantive_user_message():
     agent, mm = _agent_with_memory_manager()
+    agent.tool_progress_callback = MagicMock()
     query = "what did we decide about the deploy pipeline?"
     ctx = _build(agent, user_message=query)
-    mm.prefetch_all.assert_called_once_with(query)
+    mm.prefetch_all.assert_called_once_with(query, event_callback=agent.tool_progress_callback)
     assert ctx.ext_prefetch_cache == "REMEMBERED CONTEXT"
 
 
