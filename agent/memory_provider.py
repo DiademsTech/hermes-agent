@@ -213,6 +213,14 @@ class MemoryProvider(ABC):
         """
         return None
 
+    def recall_receipt(self) -> Optional[RecallStatus]:
+        """Describe the last injection for structured events, without a text indicator.
+
+        Providers may expose this even when their optional conversational
+        status line is disabled. Never run a second recall here.
+        """
+        return self.recall_status()
+
     def sync_turn(
         self,
         user_content: str,

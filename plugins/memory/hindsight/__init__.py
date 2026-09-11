@@ -1975,7 +1975,13 @@ class HindsightMemoryProvider(MemoryProvider):
         is turned off (``recall_indicator=false``), so customer-facing agents
         can suppress the "recalled N memories" status line.
         """
-        if not self._recall_indicator or not self._last_recall_returned:
+        if not self._recall_indicator:
+            return None
+        return self.recall_receipt()
+
+    def recall_receipt(self) -> Optional[RecallStatus]:
+        """Structured display receipt, independent of the textual indicator."""
+        if not self._last_recall_returned:
             return None
         return RecallStatus(provider_label="Hindsight", count=self._last_recall_count, glyph=_HINDSIGHT_GLYPH, memories=self._last_recall_memories or None)
 

@@ -625,7 +625,7 @@ class MemoryManager:
                     memories = None
                     if returned:
                         try:
-                            status = provider.recall_status()
+                            status = provider.recall_receipt()
                             memories = getattr(status, "memories", None)
                             if status and type(status.count) is int and status.count > 0:
                                 count = status.count

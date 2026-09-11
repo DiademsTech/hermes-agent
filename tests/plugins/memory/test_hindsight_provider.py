@@ -906,6 +906,18 @@ class TestRecallStatus:
         assert p._last_recall_returned is True
         assert p.recall_status() is None
 
+    def test_structured_receipt_survives_disabled_text_indicator(self, provider_with_config):
+        from agent.memory_manager import MemoryManager
+        p = provider_with_config(recall_sync=True, recall_indicator=False)
+        manager = MemoryManager()
+        manager.add_provider(p)
+        events = []
+        context = manager.prefetch_all("Diadems", event_callback=lambda kind, **data: events.append(data))
+        assert "Memory 1" in context and "Memory 2" in context
+        assert manager.describe_recall() == ""
+        assert events[-1]["count"] == 2
+        assert events[-1]["memories"] == ("Memory 1", "Memory 2")
+
     def test_reflect_mode_reports_generic_count(self, provider_with_config):
         p = provider_with_config(recall_prefetch_method="reflect")
         p.queue_prefetch("test")
