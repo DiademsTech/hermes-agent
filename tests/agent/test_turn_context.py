@@ -286,9 +286,10 @@ def test_prefetch_skipped_for_trivial_user_message():
 
 def test_prefetch_runs_for_substantive_user_message():
     agent, mm = _agent_with_memory_manager()
+    agent.event_callback = MagicMock()
     query = "what did we decide about the deploy pipeline?"
     ctx = _build(agent, user_message=query)
-    mm.prefetch_all.assert_called_once_with(query)
+    mm.prefetch_all.assert_called_once_with(query, event_callback=agent.event_callback)
     assert ctx.ext_prefetch_cache == "REMEMBERED CONTEXT"
 
 

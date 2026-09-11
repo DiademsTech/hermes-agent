@@ -196,7 +196,18 @@ def _make_run_event_callback(
         **kwargs,
     ):
         ts = time.time()
-        if event_type == "tool.started":
+        if event_type == "memory.recall":
+            phase = kwargs.get("phase")
+            if phase not in {"started", "completed", "failed"}:
+                return
+            count = kwargs.get("count")
+            _push({
+                "event": "memory.recall", "run_id": run_id, "timestamp": ts,
+                "phase": phase,
+                "returned": kwargs.get("returned") is True,
+                "count": count if type(count) is int and count > 0 else None,
+            })
+        elif event_type == "tool.started":
             _push({
                 "event": "tool.started",
                 "run_id": run_id,

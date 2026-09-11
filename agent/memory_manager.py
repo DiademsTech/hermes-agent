@@ -591,7 +591,7 @@ class MemoryManager:
         """
         return extract_user_instruction_from_skill_message(text)
 
-    def prefetch_all(self, query: str, *, session_id: str = "") -> str:
+    def prefetch_all(self, query: str, *, session_id: str = "", event_callback=None) -> str:
         """Collect prefetch context from all providers.
 
         Returns merged context text labeled by provider. Empty providers
@@ -600,13 +600,41 @@ class MemoryManager:
         clean_query = self._strip_skill_scaffolding(query)
         if not clean_query:
             return ""
+
+        def report(phase, *, returned=False, count=None):
+            # Display telemetry only: never expose the query, prompt or memory
+            # contents, and never let a disconnected client affect recall.
+            if event_callback:
+                try:
+                    event_callback("memory.recall", phase=phase, returned=returned, count=count)
+                except Exception:
+                    logger.debug("Memory recall event delivery failed", exc_info=True)
+
         parts = []
         for provider in self._providers:
+            external = provider.name != "builtin"
+            if external:
+                report("started")
             try:
                 result = self._prefetch_provider(provider, clean_query, session_id=session_id)
                 if result and result.strip():
                     parts.append(result)
+                if external:
+                    returned = bool(result and result.strip())
+                    count = None
+                    if returned:
+                        try:
+                            status = provider.recall_status()
+                            if status and type(status.count) is int and status.count > 0:
+                                count = status.count
+                        except Exception:
+                            pass
+                    # An empty return can also mean a timeout or disabled
+                    # recall. It is not proof that a search found zero facts.
+                    report("completed", returned=returned, count=count)
             except Exception as e:
+                if external:
+                    report("failed")
                 logger.debug(
                     "Memory provider '%s' prefetch failed (non-fatal): %s",
                     provider.name, e,
