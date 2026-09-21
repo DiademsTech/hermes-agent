@@ -689,6 +689,7 @@ def _inject_session_context_env(env: dict) -> None:
 
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
     """Filter Hermes-managed secrets from a subprocess environment."""
+    from tools.env_passthrough import scoped_passthrough_additions
     try:
         from tools.env_passthrough import (
             is_env_passthrough as _is_passthrough,
@@ -701,7 +702,9 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     sanitized: dict[str, str] = {}
     _plugin_strip = _plugin_terminal_env_strip_keys()
 
-    for key, value in (base_env or {}).items():
+    candidates = dict(base_env or {})
+    candidates.update(scoped_passthrough_additions(candidates))
+    for key, value in candidates.items():
         if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             continue
         if _is_hermes_internal_secret(key):
@@ -1527,6 +1530,7 @@ def _path_env_key(run_env: dict) -> str | None:
 
 def _make_run_env(env: dict) -> dict:
     """Build a run environment with a sane PATH and provider-var stripping."""
+    from tools.env_passthrough import scoped_passthrough_additions
     try:
         from tools.env_passthrough import (
             is_env_passthrough as _is_passthrough,
@@ -1537,6 +1541,7 @@ def _make_run_env(env: dict) -> dict:
         _resolve_passthrough_value = lambda _name, fallback: fallback  # noqa: E731
 
     merged = dict(os.environ | env)
+    merged.update(scoped_passthrough_additions(merged))
     run_env = {}
     for k, v in merged.items():
         if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):

@@ -295,6 +295,10 @@ def _scrub_child_env(source_env, is_passthrough=None, is_windows=None):
     if is_windows is None:
         is_windows = _IS_WINDOWS
 
+    from tools.env_passthrough import scoped_passthrough_additions
+
+    source_env = dict(source_env)
+    source_env.update(scoped_passthrough_additions(source_env))
     scrubbed = {}
     # Non-secret HERMES_* vars dropped by the tightened allowlist (#27303). The
     # broad "HERMES_" prefix used to pass these through; now only the

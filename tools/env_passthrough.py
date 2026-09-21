@@ -218,6 +218,29 @@ def resolve_passthrough_value(
     return get_secret(name, None if multiplex_active else fallback)
 
 
+def scoped_passthrough_additions(present: Iterable[str]) -> dict[str, str]:
+    """Declared values held only by the bound profile, not the process env.
+
+    Backport of upstream 802a9975: multiplexed turns do not reload secrets
+    into os.environ. Only enumerate the allowlist, never the entire scope;
+    without a bound scope preserve the single-profile behavior.
+    """
+    from agent.secret_scope import _is_global_env, current_secret_scope
+
+    scope = current_secret_scope()
+    if not scope:
+        return {}
+    present = set(present)
+    additions: dict[str, str] = {}
+    for name in get_all_passthrough():
+        if name in present or _is_global_env(name):
+            continue
+        value = scope.get(name)
+        if value is not None:
+            additions[name] = value
+    return additions
+
+
 def clear_env_passthrough() -> None:
     """Reset the skill-scoped allowlist (e.g. on session reset)."""
     _get_allowed().clear()
