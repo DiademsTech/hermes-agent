@@ -69,6 +69,18 @@ jobs:
             tests/gateway/test_api_server_runs.py \
             tests/gateway/test_api_server_run_queue.py \
             -q
+          if [ -f tests/tools/test_scoped_vault_live_env.py ]; then
+            scripts/run_tests.sh \
+              tests/tools/test_scoped_vault_live_env.py \
+              tests/tools/test_env_passthrough.py \
+              tests/tools/test_skill_env_passthrough.py \
+              tests/tools/test_local_env_blocklist.py \
+              tests/tools/test_local_env_session_leak.py \
+              tests/tools/test_code_kernel.py \
+              tests/agent/test_secret_scope.py \
+              tests/gateway/test_api_server_multiplex_secret_scope.py \
+              -q
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
