@@ -20,6 +20,10 @@ _TOKENS_SQL = "(COALESCE(s.input_tokens, 0) + COALESCE(s.output_tokens, 0))"
 _COST_SQL = "COALESCE(s.actual_cost_usd, s.estimated_cost_usd, 0)"
 
 
+class SessionMaintenanceDeferred(RuntimeError):
+    """Automatic retention yielded to a live conversation writer."""
+
+
 def _like(value: str) -> str:
     return f"%{_escape_like(value.lower())}%"
 
@@ -271,6 +275,7 @@ class SessionMaintenanceMixin:
 
     def prune_sessions(self, older_than_days: Optional[float] = 90, source: str = None,
                        sessions_dir: Optional[Path] = None, exclude_active_write_guards: bool = False,
+                       defer_if_active: bool = False,
                        **filters) -> int:
         """Delete ended sessions inactive for ``older_than_days`` (an explicit ``started_before`` /
         ``last_active_before`` overrides it; None = no implicit bound) matching the filters.
@@ -281,6 +286,14 @@ class SessionMaintenanceMixin:
         where, where_params = self._prune_where(older_than_days, source, filters)
         removed_ids: list[str] = []
         def _do(conn):
+            # Check under BEGIN IMMEDIATE: a preflight races turn admission.
+            # New turns then wait before inference, rather than losing their
+            # heartbeat to deletion of unrelated expired transcripts.
+            if defer_if_active and conn.execute(
+                "SELECT 1 FROM session_turn_leases WHERE expires_at > ? LIMIT 1",
+                (time.time(),),
+            ).fetchone():
+                raise SessionMaintenanceDeferred()
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
             if exclude_active_write_guards:
@@ -419,7 +432,8 @@ class SessionMaintenanceMixin:
             # once at entry. No-op when the watchdog is not armed; never raises.
             report_startup_progress(900.0, phase="state_db_auto_prune")
             result["pruned"] = pruned = self.prune_sessions(
-                older_than_days=retention_days, sessions_dir=sessions_dir, exclude_active_write_guards=True)
+                older_than_days=retention_days, sessions_dir=sessions_dir,
+                exclude_active_write_guards=True, defer_if_active=True)
             report_startup_progress(900.0, phase="state_db_auto_sweep")
             closed = self.sweep_orphaned_sessions(
                 max_idle_seconds=float(retention_days) * 86400.0,
@@ -470,6 +484,10 @@ class SessionMaintenanceMixin:
                 logger.info("state.db auto-maintenance: closed %d stale open session(s), "
                             "pruned %d session(s) inactive for %d days%s",
                             len(closed), pruned, retention_days, " + VACUUM" if result["vacuumed"] else "")
+        except SessionMaintenanceDeferred:
+            result["skipped"] = True
+            result["deferred"] = "active_turn"
+            logger.info("state.db auto-maintenance deferred: active session turn")
         except Exception as exc:
             # Maintenance must never block startup.
             logger.warning("state.db auto-maintenance failed: %s", exc)

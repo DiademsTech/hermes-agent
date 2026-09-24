@@ -68,6 +68,7 @@ _STATIC_FEATURE_FLAGS = {
     "run_queue": True, "run_queue_controls": True, "run_events_message_interim": True,
     "vault_scope_only_passthrough": True,
     "session_messages_include_compacted": True,
+    "session_auto_prune_idle_guard": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
     "session_resources": True, "model_options": True, "session_chat": True,
