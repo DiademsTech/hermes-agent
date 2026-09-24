@@ -3363,6 +3363,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "approval_events": True,
                 "session_resources": True,
                 "session_messages_include_compacted": True,
+                "session_auto_prune_idle_guard": True,
                 "automation_memory_auto_retain": True,
                 "model_options": True,
                 "session_chat": True,

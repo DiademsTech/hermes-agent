@@ -8751,6 +8751,7 @@ class AIAgent:
         durable_turn_lease_activity_lock = threading.Lock()
         durable_turn_lease_turn_active = False
         durable_turn_lease_interrupt_message = None
+        durable_turn_lease_failure = None
         token = None
         acct_token = None
         task_started = False
@@ -8960,8 +8961,8 @@ class AIAgent:
                 )
 
                 def _refresh_durable_turn_lease() -> None:
-                    def _interrupt_turn(message: str) -> None:
-                        nonlocal durable_turn_lease_interrupt_message
+                    def _interrupt_turn(message: str, failure: str) -> None:
+                        nonlocal durable_turn_lease_interrupt_message, durable_turn_lease_failure
                         with durable_turn_lease_activity_lock:
                             if (
                                 durable_turn_lease_stop.is_set()
@@ -8969,6 +8970,7 @@ class AIAgent:
                             ):
                                 return
                             durable_turn_lease_interrupt_message = message
+                            durable_turn_lease_failure = failure
                             try:
                                 self.interrupt(message, hard_cancel=True)
                             except Exception:
@@ -8993,7 +8995,8 @@ class AIAgent:
                                 )
                                 _interrupt_turn(
                                     "Session turn lease lost; stopping to protect "
-                                    "the transcript."
+                                    "the transcript.",
+                                    "session_turn_lease_lost",
                                 )
                                 return
                         except Exception:
@@ -9006,7 +9009,8 @@ class AIAgent:
                             )
                             _interrupt_turn(
                                 "Session turn lease could not be refreshed; "
-                                "stopping to protect the transcript."
+                                "stopping to protect the transcript.",
+                                "session_turn_lease_unavailable",
                             )
                             return
 
@@ -9085,7 +9089,17 @@ class AIAgent:
                     # outer finally: a refresher firing between stop and join
                     # would otherwise set an interrupt that survives the clear.
             terminal = result if isinstance(result, dict) else {}
-            if terminal.get("interrupted") is True:
+            if durable_turn_lease_failure:
+                # Infrastructure failure is not a user cancellation or a new
+                # correction to replay. Preserve the hard stop while exposing
+                # a bounded cause through the existing native failure path.
+                terminal.update(failed=True, completed=False,
+                                error=durable_turn_lease_failure,
+                                failure_reason=durable_turn_lease_failure)
+                if terminal.get("interrupt_message") == durable_turn_lease_interrupt_message:
+                    terminal.pop("interrupt_message", None)
+                relay_outcome = "failed"
+            elif terminal.get("interrupted") is True:
                 relay_outcome = "cancelled"
             elif terminal.get("failed") is True:
                 relay_outcome = "failed"

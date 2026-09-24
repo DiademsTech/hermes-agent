@@ -353,6 +353,8 @@ def test_run_conversation_interrupts_when_lease_refresh_lost(monkeypatch):
     assert interrupt_calls
     assert interrupt_calls[0][1] is True
     assert "lease lost" in str(interrupt_calls[0][0]).lower()
+    assert result["failed"] is True
+    assert result["error"] == "session_turn_lease_lost"
 
 
 def test_run_conversation_interrupts_when_lease_refresh_errors(monkeypatch):
@@ -383,6 +385,7 @@ def test_run_conversation_interrupts_when_lease_refresh_errors(monkeypatch):
                     "api_calls": 0,
                     "completed": False,
                     "interrupted": True,
+                    "interrupt_message": _agent._interrupt_message,
                 }
             time.sleep(0.01)
         raise AssertionError("refresh error did not interrupt the turn")
@@ -396,6 +399,10 @@ def test_run_conversation_interrupts_when_lease_refresh_errors(monkeypatch):
     )
 
     assert result.get("interrupted") is True
+    assert result["failed"] is True
+    assert result["completed"] is False
+    assert result["error"] == "session_turn_lease_unavailable"
+    assert "interrupt_message" not in result
     assert interrupt_calls
     assert interrupt_calls[0][1] is True
     assert "could not be refreshed" in str(interrupt_calls[0][0]).lower()

@@ -4152,6 +4152,10 @@ class SessionCompressionInProgressError(CompressionSessionBusyError):
     """
 
 
+class SessionMaintenanceDeferred(RuntimeError):
+    """Automatic retention yielded to a live conversation writer."""
+
+
 class SessionTurnLeaseLostError(RuntimeError):
     """A transcript write presented a turn-lease holder that no longer owns it.
 
@@ -14640,9 +14644,14 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         older_than_days: Optional[float] = 90,
         source: str = None,
         sessions_dir: Optional[Path] = None,
+        defer_if_active: bool = False,
         **filters,
     ) -> int:
         """Delete sessions matching the filters. Returns count deleted.
+
+        ``defer_if_active`` is used by automatic retention: it raises
+        SessionMaintenanceDeferred if any unexpired turn lease exists, checked
+        inside the deletion transaction. Explicit prune keeps its semantics.
 
         By default, delete ended sessions inactive for
         ``older_than_days`` days, optionally restricted to ``source``.
@@ -14683,6 +14692,15 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         removed_ids: list[str] = []
 
         def _do(conn):
+            # Check under the same BEGIN IMMEDIATE as the deletes. A read-only
+            # preflight races a new turn acquiring its lease. Once this check
+            # passes, new turns wait at admission rather than losing a running
+            # turn's heartbeat to a large retention/FTS transaction.
+            if defer_if_active and conn.execute(
+                "SELECT 1 FROM session_turn_leases WHERE expires_at > ? LIMIT 1",
+                (time.time(),),
+            ).fetchone():
+                raise SessionMaintenanceDeferred()
             cursor = conn.execute(
                 f"SELECT s.id FROM sessions s WHERE {where}", where_params
             )
@@ -15525,6 +15543,11 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         called once at startup from long-lived entrypoints (CLI, gateway, cron
         scheduler).
 
+        Retention defers while a conversation holds a live turn lease. This
+        does not record a completed sweep, so the next idle startup retries.
+        Full VACUUM remains an offline operation for live hosted gateways;
+        callers serving conversations must pass vacuum=False.
+
         When *sessions_dir* is provided, on-disk transcript files
         (``.json`` / ``.jsonl`` / ``request_dump_*``) for pruned sessions
         are removed as part of the same sweep (issue #3015).
@@ -15555,6 +15578,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             pruned = self.prune_sessions(
                 older_than_days=retention_days,
                 sessions_dir=sessions_dir,
+                defer_if_active=True,
             )
             result["pruned"] = pruned
 
@@ -15591,6 +15615,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     retention_days,
                     " + VACUUM" if result["vacuumed"] else "",
                 )
+        except SessionMaintenanceDeferred:
+            # Do not stamp last_auto_prune: a later idle startup must retry,
+            # and operators must not mistake a deferred sweep for retention.
+            result["skipped"] = True
+            result["deferred"] = "active_turn"
+            logger.info("state.db auto-maintenance deferred: active session turn")
         except Exception as exc:
             # Maintenance must never block startup. Log and return error marker.
             logger.warning("state.db auto-maintenance failed: %s", exc)
