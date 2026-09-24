@@ -65,6 +65,7 @@ _BROWSER_CONTROL_PROTOCOL_VERSION = 1
 
 # /v1/capabilities static feature flags (order is part of the JSON shape).
 _STATIC_FEATURE_FLAGS = {
+    "session_auto_prune_idle_guard": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
     "session_resources": True, "model_options": True, "session_chat": True,

@@ -42,6 +42,7 @@ class DurableTurnLease:
         self._lock = threading.Lock()
         self.turn_active = False
         self.interrupt_message: Optional[str] = None
+        self.failure_reason: Optional[str] = None
         self.watchdog = None  # TurnLivenessWatchdog when configured
         self.timer_handles: list = []  # periodic_scheduler handles, cancelled in join_threads
 
@@ -112,13 +113,14 @@ class DurableTurnLease:
         with self._lock:
             return self.turn_active
 
-    def _interrupt_turn(self, message: str) -> None:
+    def _interrupt_turn(self, message: str, failure: str = "session_turn_lease_lost") -> None:
         """Lease-loss interrupts fire UNCONDITIONALLY (no generation claim): a lost lease means
         this process no longer owns the session. Only the watchdog's stalls can be spuriously stale."""
         with self._lock:
             if self.stop.is_set() or not self.turn_active:
                 return
             self.interrupt_message = message
+            self.failure_reason = failure
             try:
                 self.agent.interrupt(message, hard_cancel=True, tool_reason=_REASON_LEASE_LOST)
             except Exception:
@@ -204,7 +206,8 @@ class DurableTurnLease:
                 "Failed to refresh session turn lease: %s", self._current_session_id(), exc_info=True,
             )
             self._interrupt_turn(
-                "Session turn lease could not be refreshed; stopping to protect the transcript."
+                "Session turn lease could not be refreshed; stopping to protect the transcript.",
+                "session_turn_lease_unavailable",
             )
         return False
 
