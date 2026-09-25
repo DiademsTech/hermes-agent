@@ -59,9 +59,11 @@ async def reorder_queue(adapter, request):
     sid, order, expected = body.get("session_id"), body.get("order"), body.get("expected_order")
     if not isinstance(sid, str) or not isinstance(order, list) or not isinstance(expected, list) or not all(isinstance(rid, str) for rid in order + expected):
         return error("Session and ordered run ids required", 400)
+    from gateway.platforms.api_server_runs import _queue_session_ids
+    session_ids = await _queue_session_ids(adapter, sid)
     current = [rid for rid in adapter._queued_run_inputs
                if adapter._request_owns_run(request, rid)
-               and adapter._run_statuses.get(rid, {}).get("session_id") == sid
+               and adapter._run_statuses.get(rid, {}).get("session_id") in session_ids
                and adapter._run_statuses[rid].get("status") == "queued"
                and rid not in adapter._stopping_run_ids]
     if current != expected or len(order) != len(current) or set(order) != set(current):

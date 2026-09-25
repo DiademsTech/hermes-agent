@@ -3249,8 +3249,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         db = await self._ensure_session_db_async()
         if db is None:
             return self._session_db_unavailable()
-        lane = (str(_api_request_profile.get() or ""), session_id)
-        if self._run_idempotency_store.queue_inputs(self._run_idempotency_scope(request), session_id) or any(
+        from gateway.platforms.api_server_runs import _queue_session_ids
+        session_ids = await _queue_session_ids(self, session_id)
+        lane = (str(_api_request_profile.get() or ""), session_ids[0])
+        if any(self._run_idempotency_store.queue_inputs(self._run_idempotency_scope(request), sid) for sid in session_ids) or any(
             self._run_lanes.get(rid) == lane for rid in self._queue_mode_run_ids
         ):
             return web.json_response(_openai_error(

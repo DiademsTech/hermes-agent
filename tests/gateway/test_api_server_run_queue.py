@@ -286,3 +286,86 @@ def test_queue_order_is_independent_of_wall_clock(tmp_path):
     assert [row['run_id'] for row in store.queue_inputs('scope','s')]==['z','a','m']
     store.reorder_queue_inputs(['m','z','a'])
     assert [row['run_id'] for row in RunIdempotencyStore(str(tmp_path/'runs.db')).queue_inputs('scope','s')]==['m','z','a']
+
+
+@pytest.mark.asyncio
+async def test_queue_follows_native_compression_tip(tmp_path):
+    from hermes_state import SessionDB
+    db = SessionDB(tmp_path / "state.db")
+    db.create_session("root", source="api")
+    adapter = _make_adapter()
+    adapter._run_idempotency_store = RunIdempotencyStore(str(tmp_path / "runs.db"))
+    gate, started = threading.Event(), threading.Event()
+    sessions = []
+    def create(**kwargs):
+        agent = MagicMock()
+        agent.session_prompt_tokens = agent.session_completion_tokens = agent.session_total_tokens = 0
+        sessions.append(kwargs["session_id"])
+        def run(**unused):
+            if len(sessions) == 1:
+                started.set()
+                assert gate.wait(5)
+            return {"final_response": "done"}
+        agent.run_conversation.side_effect = run
+        return agent
+    async with TestClient(TestServer(app_for(adapter))) as client:
+        with patch.object(adapter, "_ensure_session_db_async", AsyncMock(return_value=db)), patch.object(adapter, "_create_agent", side_effect=create), patch.object(adapter, "_conversation_history_for_session", AsyncMock(return_value=[])):
+            async def post(text, sid):
+                r = await client.post("/v1/runs", json={"input": text, "session_id": sid, "queue": True}, headers={"Idempotency-Key": text})
+                assert r.status == 202, await r.text()
+                return (await r.json())["run_id"]
+            first = await post("first", "root")
+            assert await asyncio.to_thread(started.wait, 3)
+            try:
+                second = await post("second", "root")
+                db.end_session("root", "compression")
+                db.create_session("tip", source="api", parent_session_id="root")
+                third = await post("third", "tip")
+                for sid in ("root", "tip"):
+                    rows = (await (await client.get("/v1/runs?session_id=" + sid)).json())["runs"]
+                    assert [r["queued_input"] for r in rows if "queued_input" in r] == ["second", "third"]
+                assert sessions == ["root"]
+            finally:
+                gate.set()
+            await settled(adapter, third)
+            assert sessions == ["root", "tip", "tip"]
+            assert adapter._run_statuses[second]["session_id"] == "tip"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_queued_turn_uses_native_live_owner(tmp_path):
+    adapter = _make_adapter()
+    adapter._run_idempotency_store = RunIdempotencyStore(str(tmp_path / "runs.db"))
+    record = {"delivery_id": "delivery-one", "status": "settled", "reply": "Owner reply"}
+    async with TestClient(TestServer(app_for(adapter))) as client:
+        with patch.object(adapter, "_admit_to_live_bot_chat", AsyncMock(return_value=(tmp_path, record))) as admit, patch.object(adapter, "_create_agent") as create, patch("tools.bot_live_delivery.await_delivery_async", AsyncMock(return_value=record)):
+            response = await client.post("/v1/runs", json={"input": "queued", "session_id": "one", "queue": True}, headers={"Idempotency-Key": "one"})
+            assert response.status == 202
+            rid = (await response.json())["run_id"]
+            await settled(adapter, rid)
+            create.assert_not_called()
+            admit.assert_awaited_once()
+            assert adapter._run_statuses[rid]["output"] == "Owner reply"
+            assert adapter._run_idempotency_store.queue_inputs(adapter._run_owners[rid], "one") == []
+
+
+@pytest.mark.asyncio
+async def test_cancelled_constructor_returns_memory_checkout(tmp_path):
+    adapter = _make_adapter()
+    started, release = threading.Event(), threading.Event()
+    agent = MagicMock()
+    def create(**kwargs):
+        started.set()
+        assert release.wait(5)
+        return agent
+    async with TestClient(TestServer(app_for(adapter))) as client:
+        with patch.object(adapter, "_create_agent", side_effect=create), patch.object(adapter._memory_sessions, "checkin") as checkin:
+            response = await client.post("/v1/runs", json={"input": "hello", "session_id": "one"})
+            rid = (await response.json())["run_id"]
+            assert await asyncio.to_thread(started.wait, 3)
+            adapter._active_run_tasks[rid].cancel()
+            release.set()
+            await settled(adapter, rid)
+            checkin.assert_called_once_with(agent)
+            agent.run_conversation.assert_not_called()
