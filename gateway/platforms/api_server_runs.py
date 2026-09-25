@@ -543,6 +543,17 @@ async def _resolve_live_session_id(self, session_id: str) -> str:
         return session_id
 
 
+async def _queue_session_ids(self, session_id: str) -> list[str]:
+    """A FIFO follows compression continuations, never delegated or forked sessions."""
+    db = await self._ensure_session_db_async()
+    resolver = getattr(db, "get_compression_lineage", None)
+    if callable(resolver):
+        ids = await asyncio.to_thread(resolver, session_id)
+        if isinstance(ids, list) and ids and all(isinstance(sid, str) for sid in ids):
+            return ids
+    return [session_id]
+
+
 async def run_internal_session_turn(self, *, session_id: str, text: str, profile: str,
                                 notification_category: str = "result", _api_server) -> None:
     """Run one background wake turn against a raw session id IN-PROCESS (no HTTP, no API key).
@@ -690,7 +701,6 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         if outcome == "conflict" or (outcome == "reused" and record is not None):
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
     run_id = f"run_{uuid.uuid4().hex}"
-    self._run_owners[run_id] = self._run_idempotency_scope(request)
     # Same precedence as /v1/responses: body session_id > response chain > X-Hermes-Session-Key
     # conversation > run_id (which would otherwise re-key every affinity surface per run).
     # An explicit or chained session owns its routing key and is never rebound to the header.
@@ -715,7 +725,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     session_history_delivery = not previous_response_id and not conversation_history
     if not queue_mode and not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
-    lane = (str(_api_server._api_request_profile.get() or ""), str(session_id or ""))
+    session_ids = await _queue_session_ids(self, session_id)
+    lane = (str(_api_server._api_request_profile.get() or ""), session_ids[0])
     if lane in self._deleting_run_sessions:
         return web.json_response(_openai_error("Session is being deleted", code="session_busy"), status=409)
     predecessors = [
@@ -730,7 +741,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         ), status=409)
     if queue_mode and (
         len(predecessors) >= 20 or len(self._queued_run_inputs) >= 64
-        or len(self._run_idempotency_store.queue_inputs(idempotency_scope, session_id)) >= 20
+        or sum(len(self._run_idempotency_store.queue_inputs(idempotency_scope, sid)) for sid in session_ids) >= 20
     ):
         return web.json_response(_openai_error(
             "Session queue is full", code="run_queue_full"
@@ -739,6 +750,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     if limited is not None:
         return limited
 
+    self._run_owners[run_id] = self._run_idempotency_scope(request)
     q = self._run_streams[run_id] = asyncio.Queue()
     created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
@@ -1006,6 +1018,14 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             run.user_message = self._queued_run_inputs.pop(run_id)
             self._set_run_status(run_id, "running")
             with self._profile_scope(run.request_profile):
+                run.session_id = await _resolve_live_session_id(self, run.session_id)
+                run.agent_kwargs["session_id"] = run.session_id
+                self._set_run_status(run_id, "running", session_id=run.session_id)
+                admitted = await self._admit_to_live_bot_chat(run.session_id, run.user_message, run.turn_author)
+                if admitted is not None:
+                    self._run_idempotency_store.discard_queue_input(run_id)
+                    await _execute_run_via_live_owner(self, run, *admitted, _api_server=_api_server)
+                    return
                 run.conversation_history = await self._conversation_history_for_session(run.session_id)
         self._set_run_status(run_id, "running")
         if run_id in self._stopping_run_ids:
@@ -1016,15 +1036,20 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 return self._create_agent(
                     stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
                     interim_assistant_callback=_interim_cb, **run.agent_kwargs)
+        def release_unstarted_agent(agent):
+            with self._profile_scope(run.request_profile):
+                self._memory_sessions.checkin(agent)
         construction = _submit_api_worker(loop, construct_agent)
         try:
             agent = await asyncio.shield(construction)
         except asyncio.CancelledError:
             with suppress(Exception):
-                await asyncio.shield(construction)
+                abandoned_agent = await asyncio.shield(construction)
+                await asyncio.shield(_submit_api_worker(loop, lambda: release_unstarted_agent(abandoned_agent)))
             raise
         self._active_run_agents[run_id] = agent
         if run_id in self._stopping_run_ids:
+            await _submit_api_worker(loop, lambda: release_unstarted_agent(agent))
             raise asyncio.CancelledError
         if run.queue_mode:
             self._run_idempotency_store.discard_queue_input(run_id)
@@ -1333,17 +1358,20 @@ async def _handle_list_runs(self, request, *, _api_server):
     if not session_id or len(session_id) > 256:
         return web.json_response(_api_server._openai_error("session_id is required"), status=400)
     scope = self._run_idempotency_scope(request)
-    records = {item["run_id"]: item for item in self._run_idempotency_store.queue_inputs(scope, session_id)}
+    session_ids = await _queue_session_ids(self, session_id)
+    lane = (str(_api_server._api_request_profile.get() or ""), session_ids[0])
+    records = {item["run_id"]: item for sid in session_ids
+               for item in self._run_idempotency_store.queue_inputs(scope, sid)}
     lookup_key = request.query.get("idempotency_key")
     if lookup_key:
         _, record = self._run_idempotency_store.lookup(scope, lookup_key, "")
-        if record and record["status"].get("session_id") == session_id:
+        if record and record["status"].get("session_id") in session_ids:
             records = {record["run_id"]: records.get(record["run_id"], {"run_id": record["run_id"]})}
         else:
             records = {}
     for rid in list(self._active_run_tasks):
         status = self._run_statuses.get(rid, {})
-        if not lookup_key and status.get("session_id") == session_id and self._request_owns_run(request, rid):
+        if not lookup_key and self._run_lanes.get(rid) == lane and self._request_owns_run(request, rid):
             records.setdefault(rid, {"run_id": rid})
     result = []
     for rid, item in records.items():
