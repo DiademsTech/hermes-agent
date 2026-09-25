@@ -93,6 +93,7 @@ class SessionSource:
     # Discord auto-thread continuity: the thread id a CHANNEL message WILL be delivered into, so
     # the initiating message and later in-thread follow-ups share ONE session.
     prospective_thread_id: Optional[str] = None
+    memory_auto_retain: bool = True
     # Wire-INVISIBLE trust signal (never in to_dict/from_dict, so a peer cannot forge it): came
     # over the authenticated relay WebSocket. ``platform`` is the UNDERLYING platform, not
     # ``relay``, so authz must key upstream trust off THIS flag.
@@ -122,7 +123,7 @@ class SessionSource:
 
     # Wire layout (order matters for byte-stable JSON): always-present, then truthy-only
     # optionals around the dual-written scope pair.
-    _ALWAYS_FIELDS = ("chat_id", "chat_name", "chat_type", "user_id", "user_name", "thread_id", "chat_topic")
+    _ALWAYS_FIELDS = ("chat_id", "chat_name", "chat_type", "user_id", "user_name", "thread_id", "chat_topic", "memory_auto_retain")
     _OPTIONAL_PRE_SCOPE = ("user_id_alt", "chat_id_alt")
     _OPTIONAL_POST_SCOPE = ("parent_chat_id", "message_id", "profile")
     _OPTIONAL_TAIL = ("auto_thread_initial_name", "prospective_thread_id")
@@ -152,6 +153,7 @@ class SessionSource:
             for name in cls._ALWAYS_FIELDS[1:] + cls._OPTIONAL_PRE_SCOPE + cls._OPTIONAL_POST_SCOPE + cls._OPTIONAL_TAIL
             if name != "chat_type"
         }
+        plain["memory_auto_retain"] = data.get("memory_auto_retain", True) is True
         return cls(
             platform=Platform(data["platform"]), chat_id=str(data["chat_id"]),
             chat_type=data.get("chat_type", "dm"),

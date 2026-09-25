@@ -53,6 +53,15 @@ def test_webhook_base_url_maps_wildcard_hosts_to_localhost(monkeypatch, host):
 
 
 class TestSubscribe:
+    def test_retention_is_per_subscription_and_omitted_update_preserves_it(self):
+        webhook_command(_make_args(webhook_action="subscribe", name="off", secret="test"))
+        webhook_command(_make_args(webhook_action="subscribe", name="on", secret="test", memory_auto_retain=True))
+        assert _load_subscriptions()["off"]["memory_auto_retain"] is False
+        assert _load_subscriptions()["on"]["memory_auto_retain"] is True
+        webhook_command(_make_args(webhook_action="subscribe", name="on", secret="test", description="Changed"))
+        assert _load_subscriptions()["on"]["memory_auto_retain"] is True
+        webhook_command(_make_args(webhook_action="subscribe", name="on", secret="test", memory_auto_retain=False))
+        assert _load_subscriptions()["on"]["memory_auto_retain"] is False
 
 
     def test_custom_secret(self):

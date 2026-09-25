@@ -671,7 +671,7 @@ _JOB_ARG_FIELDS = (("name", "name"), ("deliver", "deliver"), ("failure_deliver",
                    ("repeat", "repeat"), ("script", "script"), ("workdir", "workdir"),
                    ("model", "model"), ("provider", "model_provider"), ("pinned", "pinned"),
                    ("monitor_script", "monitor_script"), ("monitor_url", "monitor_url"),
-                   ("continuity", "continuity"), ("reasoning_effort", "reasoning_effort"))
+                   ("continuity", "continuity"), ("reasoning_effort", "reasoning_effort"), ("memory_auto_retain", "memory_auto_retain"))
 
 
 def _job_api_kwargs(args) -> Dict[str, Any]:

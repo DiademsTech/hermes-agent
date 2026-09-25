@@ -288,6 +288,39 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
     def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
         # _thinking / subagent.tool / subagent_progress are deliberately dropped (UI noise);
         # lifecycle boundaries must land so clients can observe delegate_task failures.
+        ts = time.time()
+        if event_type == "memory.recall":
+            phase = kwargs.get("phase")
+            if phase not in {"started", "completed", "failed"}:
+                return
+            count = kwargs.get("count")
+            event = {
+                "event": "memory.recall", "run_id": run_id, "timestamp": ts,
+                "phase": phase,
+                "returned": kwargs.get("returned") is True,
+                "count": count if type(count) is int and count > 0 else None,
+            }
+            memories = kwargs.get("memories")
+            if phase == "completed" and event["returned"] and isinstance(memories, (list, tuple)):
+                # Only the provider's discrete receipt, never the formatted
+                # context (which also contains private prompt instructions).
+                if all(isinstance(text, str) for text in memories):
+                    remaining = 65536
+                    details = []
+                    redacted = False
+                    truncated = len(memories) > 64
+                    for text in memories[:64]:
+                        safe = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+                        redacted = redacted or safe != text
+                        if len(safe) > remaining:
+                            truncated = True
+                        if remaining <= 0:
+                            break
+                        details.append(safe[:remaining])
+                        remaining -= len(details[-1])
+                    event.update(memories=details, details_truncated=truncated, details_redacted=redacted)
+            _push(event)
+            return
         fields = _FIXED_EVENT_FIELDS.get(event_type)
         if fields is not None:
             event_fields = fields(tool_name, preview, kwargs)

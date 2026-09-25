@@ -1117,6 +1117,7 @@ class TurnRunner:
             provider_sort=pr.get("sort"), provider_require_parameters=pr.get("require_parameters", False),
             provider_data_collection=pr.get("data_collection"),
             session_id=ctx.session_id, platform=platform_key,
+            memory_auto_retain=getattr(ctx.source, "memory_auto_retain", True) is True,
             user_id=src.user_id, user_id_alt=src.user_id_alt, user_name=src.user_name,
             chat_id=src.chat_id, chat_name=src.chat_name, chat_type=src.chat_type, thread_id=src.thread_id,
             gateway_session_key=ctx.session_key,
@@ -1142,6 +1143,7 @@ class TurnRunner:
             user_id_alt=getattr(ctx.source, "user_id_alt", None),
             skip_context_files=skip_context_files,
         )
+        sig = (sig, getattr(ctx.source, "memory_auto_retain", True) is True)
         cache_lock = getattr(runner, "_agent_cache_lock", None)
         cache = getattr(runner, "_agent_cache", None)
         peek_sid, dead = self._cached_sid_is_dead(cache_lock, cache)

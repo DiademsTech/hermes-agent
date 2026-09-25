@@ -1750,6 +1750,7 @@ def create_job(
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    memory_auto_retain: bool = False,
     failure_deliver: Optional[str] = None,
     paused: bool = False,
     paused_reason: Optional[str] = None,
@@ -1785,6 +1786,8 @@ def create_job(
     f = {key: norm(raw[key]) for key, norm in _CREATE_FIELD_NORMALIZERS.items()}
     normalized_skills = _normalize_skill_list(skill, skills)
     normalized_attach = attach_to_session if isinstance(attach_to_session, bool) else None
+    if type(memory_auto_retain) is not bool:
+        raise ValueError("memory_auto_retain must be a boolean")
     normalized_reasoning_effort = _normalize_reasoning_effort(reasoning_effort)
 
     _validate_job_mode_invariants(f["monitor_script"], f["monitor_url"], f["no_agent"], f["script"])
@@ -1820,6 +1823,7 @@ def create_job(
         "monitor_script": f["monitor_script"],
         "monitor_url": f["monitor_url"],
         "monitor_state": None,
+        "memory_auto_retain": memory_auto_retain,
         "context_from": f["context_from"],
         "schedule": parsed_schedule,
         "schedule_display": parsed_schedule.get("display", schedule),
@@ -2025,6 +2029,8 @@ def _fill_missing_next_run(updated: Dict[str, Any]) -> None:
 def update_job(job_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Update a job by ID, refreshing derived schedule fields when needed."""
     # ``id`` is a path component under OUTPUT_DIR — changing it would leak path-escape values.
+    if "memory_auto_retain" in updates and type(updates["memory_auto_retain"]) is not bool:
+        raise ValueError("memory_auto_retain must be a boolean")
     bad_fields = _IMMUTABLE_JOB_FIELDS.intersection(updates or {})
     if bad_fields:
         raise ValueError(f"Cron job field(s) cannot be updated: {', '.join(sorted(bad_fields))}")

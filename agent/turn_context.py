@@ -870,7 +870,9 @@ def _memory_turn_start_and_prefetch(
     ext_prefetch_cache = ""
     with suppress(Exception):
         if not is_trivial_prompt(_query):
-            ext_prefetch_cache = agent._memory_manager.prefetch_all(_query, session_id=agent.session_id) or ""
+            ext_prefetch_cache = agent._memory_manager.prefetch_all(
+                _query, session_id=agent.session_id,
+                event_callback=getattr(agent, "tool_progress_callback", None)) or ""
     # Deterministic recall indicator via _emit_status so the model can't silently
     # drop injected memory.
     if ext_prefetch_cache:

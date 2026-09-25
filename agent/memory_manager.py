@@ -444,14 +444,43 @@ class MemoryManager:
     # providers get just the user's instruction (None for a bare invocation).
     _strip_skill_scaffolding = staticmethod(extract_user_instruction_from_skill_message)
 
-    def prefetch_all(self, query: str, *, session_id: str = "") -> str:
+    def prefetch_all(self, query: str, *, session_id: str = "", event_callback=None) -> str:
         """Merge non-empty prefetch context from all providers (failures are non-fatal)."""
         clean_query = self._strip_skill_scaffolding(query)
         if not clean_query:
             return ""
-        parts = self._each_provider(
-            "prefetch failed (non-fatal)", lambda p: self._prefetch_provider(p, clean_query, session_id=session_id),
-        )
+        def report(phase, **fields):
+            if event_callback is not None:
+                try:
+                    event_callback("memory.recall", phase=phase, **fields)
+                except Exception:
+                    logger.debug("Memory recall event delivery failed", exc_info=True)
+
+        def prefetch(provider):
+            external = provider.name != "builtin"
+            if external:
+                report("started")
+            try:
+                result = self._prefetch_provider(provider, clean_query, session_id=session_id)
+            except Exception:
+                if external:
+                    report("failed")
+                raise
+            if external:
+                returned = bool(result and result.strip())
+                count, memories = None, None
+                if returned:
+                    try:
+                        receipt = provider.recall_receipt()
+                        memories = getattr(receipt, "memories", None)
+                        if receipt and type(receipt.count) is int and receipt.count > 0:
+                            count = receipt.count
+                    except Exception:
+                        pass
+                report("completed", returned=returned, count=count, memories=memories)
+            return result
+
+        parts = self._each_provider("prefetch failed (non-fatal)", prefetch)
         return "\n\n".join(p for p in parts if p and p.strip())
 
     def _prefetch_provider(self, provider: MemoryProvider, query: str, *, session_id: str = "") -> str:

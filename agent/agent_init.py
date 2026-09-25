@@ -1224,6 +1224,7 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
     kwargs = {
         "session_id": agent.session_id,
         "platform": platform or "cli",
+        "auto_retain": getattr(agent, "_memory_auto_retain", True),
         "hermes_home": str(get_hermes_home()),
         # platform="cron" (scheduler) / "subagent" (delegate_task) → providers skip writes (MemoryProvider.initialize).
         "agent_context": platform if platform in ("cron", "subagent") else "primary",
@@ -2344,7 +2345,7 @@ def init_agent(
     platform: str = None, user_id: str = None, user_id_alt: str = None, user_name: str = None,
     chat_id: str = None, chat_name: str = None, chat_type: str = None, thread_id: str = None,
     gateway_session_key: str = None, skip_context_files: bool = False,
-    load_soul_identity: bool = False, skip_memory: bool = False,
+    load_soul_identity: bool = False, skip_memory: bool = False, memory_auto_retain: bool = True,
     skip_background_review: bool = False, session_db=None, parent_session_id: str = None,
     iteration_budget: "IterationBudget" = None, run_budget_seconds: Optional[float] = None,
     fallback_model: Dict[str, Any] = None, credential_pool=None, checkpoints_enabled: bool = False,
@@ -2361,6 +2362,7 @@ def init_agent(
         setattr(agent, _name, _params[_name])
     for _name in _GATEWAY_IDENTITY_PARAMS:
         setattr(agent, f"_{_name}", _params[_name])
+    agent._memory_auto_retain = memory_auto_retain is True
     agent.session_cwd = cwd or None
     # Shared iteration budget: parent creates, children inherit.
     agent.iteration_budget = iteration_budget or IterationBudget(max_iterations)

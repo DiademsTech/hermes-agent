@@ -2435,6 +2435,7 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         skip_context_files=not bool(workdir),
         load_soul_identity=True,
         skip_memory=False,
+        memory_auto_retain=job.get("memory_auto_retain", False) is True,
         skip_background_review=True,  # Cron has no human-in-the-loop need for skill/memory review forks (~30K tok/event)
         platform="cron",
         session_id=session_id,

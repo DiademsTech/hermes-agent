@@ -664,6 +664,7 @@ class WebhookAdapter(BasePlatformAdapter):
                                    user_id=f"webhook:{route_name}", user_name=route_name)
         if profile and isinstance(profile, str):
             source.profile = profile
+        source.memory_auto_retain = route_config.get("memory_auto_retain", False) is True
         event = MessageEvent(text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload,
                              message_id=delivery_id)
         # The per-delivery session is closed by ``on_processing_complete`` once the run finishes
