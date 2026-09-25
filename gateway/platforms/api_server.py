@@ -66,6 +66,8 @@ _BROWSER_CONTROL_PROTOCOL_VERSION = 1
 
 # /v1/capabilities static feature flags (order is part of the JSON shape).
 _STATIC_FEATURE_FLAGS = {
+    "run_queue": True, "run_queue_controls": True, "run_events_message_interim": True,
+    "vault_scope_only_passthrough": True,
     "session_messages_include_compacted": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
@@ -3244,6 +3246,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         db = await self._ensure_session_db_async()
         if db is None:
             return self._session_db_unavailable()
+        lane = (str(_api_request_profile.get() or ""), session_id)
+        if self._run_idempotency_store.queue_inputs(self._run_idempotency_scope(request), session_id) or any(
+            self._run_lanes.get(rid) == lane for rid in self._queue_mode_run_ids
+        ):
+            return web.json_response(_openai_error(
+                "Remove queued messages and finish active work before deleting the session",
+                code="session_busy",
+            ), status=409)
         # Same profile home the DB was resolved from (the profile middleware scopes
         # get_hermes_home() for this request) — without it the transcript/dump scrub is skipped.
         sessions_dir = None
@@ -3252,11 +3262,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             sessions_dir = Path(get_hermes_home()) / "sessions"
         except Exception:
             logger.debug("sessions dir unavailable for delete of %s", session_id, exc_info=True)
+        self._deleting_run_sessions.add(lane)
         try:
             deleted = await asyncio.to_thread(
                 db.delete_session, session_id, sessions_dir=sessions_dir, exclude_active_write_guards=True)
         except SessionActiveWriteGuardError as exc:
             return _error_response(str(exc), 409, code="session_active_turn")
+        finally:
+            self._deleting_run_sessions.discard(lane)
         if deleted:
             # A hard delete must also drop the gateway's durable channel→session routing entries
             # for the id, or the next inbound message resolves the SAME id and run_agent's
@@ -4089,7 +4102,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         limit = self._max_concurrent_runs
         if limit <= 0:
             return None
-        inflight = self.active_agent_work_count()
+        inflight = self.active_agent_work_count() - len(self._queued_run_inputs)
         # The current request's own reservation must not consume its last available slot.
         reservation = _api_agent_request_reservation.get()
         if reservation and reservation["active"]:
@@ -4410,11 +4423,25 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _release_run_owner_if_forgotten(self, run_id: str) -> None:
         _api_runs._release_run_owner_if_forgotten(self, run_id)
 
+    _handle_list_runs = _run_route_delegate("_handle_list_runs")
+    _handle_delete_queued_run = _run_route_delegate("_handle_delete_queued_run")
     _handle_get_run = _run_route_delegate("_handle_get_run")
     _handle_run_events = _run_route_delegate("_handle_run_events")
     _handle_run_approval = _run_route_delegate("_handle_run_approval")
     _handle_steer_run = _run_route_delegate("_handle_steer_run")
     _handle_stop_run = _run_route_delegate("_handle_stop_run")
+
+    async def _handle_edit_queued_run(self, request):
+            from .api_server_queue_controls import edit_queue
+            return await edit_queue(self, request)
+
+    async def _handle_reorder_queue(self, request):
+            from .api_server_queue_controls import reorder_queue
+            return await reorder_queue(self, request)
+
+    async def _handle_steer_queued_run(self, request):
+            from .api_server_queue_controls import steer_queue
+            return await steer_queue(self, request)
 
     async def _sweep_orphaned_runs(self) -> None:
         return await _api_runs._sweep_orphaned_runs(self)
