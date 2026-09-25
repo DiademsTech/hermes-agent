@@ -174,6 +174,10 @@ def _initialize_run_state(self, *, store_factory) -> None:
     # approval session keys (approval core resolves by session key, clients by run_id).
     self._run_idempotency_ids: set[str] = set()
     self._run_stream_subscribers: set[str] = set()
+    self._run_lanes: Dict[str, tuple[str, str]] = {}
+    self._deleting_run_sessions: set[tuple[str, str]] = set()
+    self._queued_run_inputs: Dict[str, str] = {}
+    self._queue_mode_run_ids: set[str] = set()
     self._stopping_run_ids: set[str] = set()
     self._shutdown_interrupted_run_ids: set[str] = set()
     self._run_shutdown_requested_at: Optional[float] = None
@@ -185,6 +189,11 @@ def _initialize_run_state(self, *, store_factory) -> None:
 
 def _http_routes(self) -> list[tuple[str, str, Any]]:
     return [
+        ("GET", "/v1/runs", self._handle_list_runs),
+        ("DELETE", "/v1/runs/{run_id}/queue", self._handle_delete_queued_run),
+        ("PATCH", "/v1/runs/queue", self._handle_reorder_queue),
+        ("PATCH", "/v1/runs/{run_id}/queue", self._handle_edit_queued_run),
+        ("POST", "/v1/runs/{run_id}/queue/steer", self._handle_steer_queued_run),
         ("POST", "/v1/runs", self._handle_runs), ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
@@ -452,6 +461,7 @@ class _RunLaunch:
     request_profile: Any
     browser_control_principal: Any
     browser_control_transport_family: Any
+    queue_mode: bool = False
     turn_author: Optional[Dict[str, Any]] = None  # memory-attribution label only; grants nothing
 
     @property
@@ -474,7 +484,8 @@ def _forget_run(self, run_id: str, *tables) -> None:
 
 def _retire_live_run(self, run_id: str) -> None:
     """Retire agent/task/approval control state once the executor-backed task is done."""
-    _forget_run(self, run_id, self._active_run_agents, self._active_run_tasks, self._run_approval_sessions,
+    _forget_run(self, run_id, self._run_lanes, self._queued_run_inputs, self._queue_mode_run_ids,
+                self._active_run_agents, self._active_run_tasks, self._run_approval_sessions,
                 self._stopping_run_ids, self._shutdown_interrupted_run_ids)
 
 
@@ -613,6 +624,22 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         return history_err
     previous_response_id = body.get("previous_response_id")
     session_id = body.get("session_id") or stored_session_id
+    queue_mode = body.get("queue", False)
+    if not isinstance(queue_mode, bool):
+        return web.json_response(_openai_error("'queue' must be a boolean"), status=400)
+    if queue_mode and self._room_grant_token(request):
+        return web.json_response(_openai_error("Queue requires a profile API credential"), status=403)
+    if queue_mode and not self._run_idempotency_store.durable:
+        return web.json_response(_openai_error("Queue storage unavailable"), status=503)
+    if queue_mode and (
+        not isinstance(session_id, str) or not session_id.strip()
+        or not isinstance(raw_input, str) or body.get("conversation_history") or previous_response_id
+        or not idempotency_key
+    ):
+        return web.json_response(_openai_error(
+            "Queued runs require a session_id, text input and Idempotency-Key; "
+            "history must come from the native session", code="invalid_queued_run"
+        ), status=400)
     route = self._resolve_route(body.get("model"))
     agent_overrides = _api_server._request_agent_overrides(body, virtual_model=self._model_name)
     selection_error = self._request_route_conflict_error(
@@ -629,10 +656,6 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
             retention_until=_room_retention_until(request))
         if outcome == "conflict" or (outcome == "reused" and record is not None):
             return _replay_or_conflict(self, request, outcome, record, gateway_session_key, _openai_error)
-    # Enforce concurrency only for a genuinely new run.
-    limited = self._concurrency_limited_response()
-    if limited is not None:
-        return limited
     run_id = f"run_{uuid.uuid4().hex}"
     self._run_owners[run_id] = self._run_idempotency_scope(request)
     # Same precedence as /v1/responses: body session_id > response chain > X-Hermes-Session-Key
@@ -657,8 +680,32 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     # overwrite ``conversation_history``: a caller-supplied history is authoritative for this
     # turn, never consumes the SessionDB delivery row, and is denied on the same contract.
     session_history_delivery = not previous_response_id and not conversation_history
-    if not conversation_history and selected_session_id and not previous_response_id:
+    if not queue_mode and not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
+    lane = (str(_api_server._api_request_profile.get() or ""), str(session_id or ""))
+    if lane in self._deleting_run_sessions:
+        return web.json_response(_openai_error("Session is being deleted", code="session_busy"), status=409)
+    predecessors = [
+        task for rid, task in self._active_run_tasks.items()
+        if not task.done() and self._run_lanes.get(rid) == lane
+    ] if session_id else []
+    if not queue_mode and any(
+        self._run_lanes.get(rid) == lane for rid in self._queue_mode_run_ids
+    ):
+        return web.json_response(_openai_error(
+            "This session has queued work; submit with queue=true", code="session_busy"
+        ), status=409)
+    if queue_mode and (
+        len(predecessors) >= 20 or len(self._queued_run_inputs) >= 64
+        or len(self._run_idempotency_store.queue_inputs(idempotency_scope, session_id)) >= 20
+    ):
+        return web.json_response(_openai_error(
+            "Session queue is full", code="run_queue_full"
+        ), status=429)
+    limited = None if queue_mode and predecessors else self._concurrency_limited_response()
+    if limited is not None:
+        return limited
+
     q = self._run_streams[run_id] = asyncio.Queue()
     created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
@@ -668,7 +715,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         outcome, record = self._run_idempotency_store.reserve(
             idempotency_scope, idempotency_key, idempotency_fingerprint, run_id, initial_status,
             owner_pid=self._run_owner_pid, owner_started=self._run_owner_started,
-            retention_until=_room_retention_until(request))
+            retention_until=_room_retention_until(request),
+            queue_input=user_message if queue_mode else None)
         if outcome != "created":
             _forget_run(
                 self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
@@ -685,12 +733,16 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
-        turn_author=turn_author)
+        queue_mode=queue_mode, turn_author=turn_author)
+    self._run_lanes[run_id] = lane
+    if queue_mode:
+        self._queued_run_inputs[run_id] = user_message
+        self._queue_mode_run_ids.add(run_id)
     self._activate_admitted_request()
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
     # receipt drives this run's status, so `peer run` keeps its run_id and `peer status` still works.
-    admitted = await self._admit_to_live_bot_chat(session_id, user_message, turn_author) if selected_session_id else None
+    admitted = await self._admit_to_live_bot_chat(session_id, user_message, turn_author) if selected_session_id and not queue_mode else None
     if admitted is not None:
         task = self._active_run_tasks[run_id] = asyncio.create_task(
             _execute_run_via_live_owner(self, launch, *admitted, _api_server=_api_server))
@@ -700,7 +752,7 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         self._background_tasks.add(task)  # tracked for shutdown drain
     if hasattr(task, "add_done_callback"):
         task.add_done_callback(self._background_tasks.discard)
-    return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
+    return _accepted_response(run_id, "queued" if queue_mode else "started", gateway_session_key, replayed=False)
 
 
 def _run_usage(agent) -> Dict[str, int]:
@@ -907,15 +959,42 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if run_id in self._shutdown_interrupted_run_ids:
             _finish("interrupted")
             return
+        if run.queue_mode:
+            # Re-evaluate the live order after every wakeup. Fixed predecessor
+            # tasks cannot represent edits to the FIFO (and can deadlock).
+            while True:
+                waiting = [rid for rid in self._queued_run_inputs if self._run_lanes.get(rid) == self._run_lanes[run_id]]
+                busy = any(rid != run_id and not task.done() and self._run_lanes.get(rid) == self._run_lanes[run_id]
+                           and rid not in self._queued_run_inputs for rid, task in self._active_run_tasks.items())
+                if waiting and waiting[0] == run_id and not busy and self._concurrency_limited_response() is None:
+                    break
+                await asyncio.sleep(0.05)
+            # Claim text and lane without yielding to HTTP controls.
+            run.user_message = self._queued_run_inputs.pop(run_id)
+            self._set_run_status(run_id, "running")
+            with self._profile_scope(run.request_profile):
+                run.conversation_history = await self._conversation_history_for_session(run.session_id)
         self._set_run_status(run_id, "running")
         if run_id in self._stopping_run_ids:
             _finish("cancelled")
             return
-        with self._profile_scope(run.request_profile):
-            agent = self._create_agent(
-                stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
-                interim_assistant_callback=_interim_cb, **run.agent_kwargs)
+        def construct_agent():
+            with self._profile_scope(run.request_profile):
+                return self._create_agent(
+                    stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
+                    interim_assistant_callback=_interim_cb, **run.agent_kwargs)
+        construction = _submit_api_worker(loop, construct_agent)
+        try:
+            agent = await asyncio.shield(construction)
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await asyncio.shield(construction)
+            raise
         self._active_run_agents[run_id] = agent
+        if run_id in self._stopping_run_ids:
+            raise asyncio.CancelledError
+        if run.queue_mode:
+            self._run_idempotency_store.discard_queue_input(run_id)
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
         result, usage, served_runtime = await _submit_api_worker(
             loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
@@ -937,7 +1016,11 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                               else "raw_request" if any(requested.values()) else "global"))
             _finish(status, fields, output=result.get("final_response", ""), usage=usage, runtime=served_runtime)
     except asyncio.CancelledError:
-        _finish("cancelled")
+        # Steering may have delivered the input before failing. Its durable
+        # interrupted receipt must survive task cancellation for manual recovery.
+        current = self._run_statuses.get(run_id, {})
+        if current.get("last_event") != "queue.steer_uncertain":
+            _finish("cancelled")
         raise
     except _api_server._ProviderAuthResolutionError as exc:
         # Same controlled provider-auth message the _run_agent() endpoints give.
@@ -1203,3 +1286,60 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
         if (status.get("status") in {"completed", "failed", "cancelled"}
                 and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL):
             _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids)
+
+
+async def _handle_list_runs(self, request, *, _api_server):
+    """List one session's live turns and unconsumed inputs for another device."""
+    auth_err = self._check_run_auth(request, permission="status")
+    if auth_err:
+        return auth_err
+    # A room grant is run-scoped and must never enumerate a session.
+    if self._room_grant_token(request):
+        return web.json_response(_api_server._openai_error("Run-scoped credential"), status=403)
+    session_id = request.query.get("session_id", "")
+    if not session_id or len(session_id) > 256:
+        return web.json_response(_api_server._openai_error("session_id is required"), status=400)
+    scope = self._run_idempotency_scope(request)
+    records = {item["run_id"]: item for item in self._run_idempotency_store.queue_inputs(scope, session_id)}
+    lookup_key = request.query.get("idempotency_key")
+    if lookup_key:
+        _, record = self._run_idempotency_store.lookup(scope, lookup_key, "")
+        if record and record["status"].get("session_id") == session_id:
+            records = {record["run_id"]: records.get(record["run_id"], {"run_id": record["run_id"]})}
+        else:
+            records = {}
+    for rid in list(self._active_run_tasks):
+        status = self._run_statuses.get(rid, {})
+        if not lookup_key and status.get("session_id") == session_id and self._request_owns_run(request, rid):
+            records.setdefault(rid, {"run_id": rid})
+    result = []
+    for rid, item in records.items():
+        status = self._durable_run_status(request, rid)
+        if status is not None:
+            if status.get("status") in {"running", "waiting_for_approval", "stopping", "completed"}:
+                item = {"run_id": rid}
+            result.append({**status, **item})
+    for item in result:
+        if "queued_input" in item:
+            item["queue_revision"] = hashlib.sha256(item["queued_input"].encode()).hexdigest()
+    result.sort(key=lambda item: ("queued_input" in item, item.get("queue_position", item.get("created_at", 0)), item["run_id"]))
+    return web.json_response({"runs": result, "queue_controls": True})
+
+async def _handle_delete_queued_run(self, request, *, _api_server):
+    """Remove only waiting work; never interrupt a turn that already started."""
+    auth_err = self._check_run_auth(request, permission="stop")
+    if auth_err:
+        return auth_err
+    rid = request.match_info["run_id"]
+    if not self._request_owns_run(request, rid):
+        return web.json_response(_api_server._openai_error("Run not found"), status=404)
+    status = self._durable_run_status(request, rid) or {}
+    if status.get("status") not in {"queued", "interrupted", "failed", "cancelled"}:
+        return web.json_response(_api_server._openai_error("Run already started", code="run_started"), status=409)
+    task = self._active_run_tasks.get(rid)
+    if task is not None:
+        self._stopping_run_ids.add(rid)
+        task.cancel()
+    self._run_idempotency_store.discard_queue_input(rid)
+    self._set_run_status(rid, "cancelled", last_event="run.cancelled")
+    return web.json_response({"run_id": rid, "status": "cancelled"})

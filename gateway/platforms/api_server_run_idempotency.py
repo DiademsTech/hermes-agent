@@ -106,6 +106,13 @@ class RunIdempotencyStore:
                 add_column_if_missing(self._conn, "run_idempotency", column, f"{column} {ddl}")
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS run_idempotency_run_id ON run_idempotency(run_id)")
+        self._conn.execute("""CREATE TABLE IF NOT EXISTS run_queue_inputs (
+            run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, input TEXT NOT NULL,
+            position REAL NOT NULL DEFAULT 0
+        )""")
+        queue_columns = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(run_queue_inputs)")}
+        if "position" not in queue_columns:
+            add_column_if_missing(self._conn, "run_queue_inputs", "position", "position REAL NOT NULL DEFAULT 0")
         self._conn.commit()
         self._lock = threading.Lock()
         self._tighten_permissions()
@@ -131,7 +138,7 @@ class RunIdempotencyStore:
                 raise
 
     def reserve(self, scope: str, key: str, fingerprint: str, run_id: str, status: Dict[str, Any], *,
-                owner_pid: int = 0, owner_started: int = 0, retention_until: float = 0):
+                owner_pid: int = 0, owner_started: int = 0, retention_until: float = 0, queue_input: str | None = None):
         """Atomically reserve a key; return ``(outcome, stored_record)``."""
         now = time.time()
         retention_until = max(0.0, float(retention_until or 0))
@@ -151,8 +158,37 @@ class RunIdempotencyStore:
                 ") VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (scope, key, fingerprint, run_id, encoded, int(owner_pid or 0), int(owner_started or 0),
                  retention_until, now, now))
+            if queue_input is not None:
+                self._conn.execute(
+                    "INSERT INTO run_queue_inputs(run_id,session_id,input,position) "
+                    "VALUES(?,?,?,(SELECT COALESCE(MAX(position),0)+1 FROM run_queue_inputs))",
+                    (run_id, status["session_id"], queue_input))
             self._conn.commit()
             return "created", _record(run_id, encoded, owner_pid, owner_started, now) | {"status": status}
+
+    def queue_inputs(self, scope: str, session_id: str) -> list[dict]:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT q.run_id,q.input,q.position FROM run_queue_inputs q "
+                    "JOIN run_idempotency r ON r.run_id=q.run_id "
+                    "WHERE r.scope=? AND q.session_id=? ORDER BY q.position,r.created_at,q.run_id LIMIT 100",
+                    (scope, session_id),
+                ).fetchall()
+            return [{"run_id": row[0], "queued_input": row[1], "queue_position": row[2]} for row in rows]
+
+    def update_queue_input(self, run_id: str, text: str) -> None:
+            with self._lock, self._conn:
+                self._conn.execute("UPDATE run_queue_inputs SET input=? WHERE run_id=?", (text, run_id))
+
+    def reorder_queue_inputs(self, run_ids: list[str]) -> None:
+            with self._lock, self._conn:
+                positions = [self._conn.execute("SELECT position FROM run_queue_inputs WHERE run_id=?", (rid,)).fetchone()[0] for rid in run_ids]
+                self._conn.executemany("UPDATE run_queue_inputs SET position=? WHERE run_id=?", zip(sorted(positions), run_ids))
+
+    def discard_queue_input(self, run_id: str) -> None:
+            with self._lock:
+                self._conn.execute("DELETE FROM run_queue_inputs WHERE run_id=?", (run_id,))
+                self._conn.commit()
 
     def lookup(self, scope: str, key: str, fingerprint: str, *, retention_until: float = 0):
         """Return ``missing``, ``reused`` or ``conflict`` without reserving."""
@@ -184,7 +220,7 @@ class RunIdempotencyStore:
                 terminal = False
             if terminal:
                 self._conn.execute(
-                    "DELETE FROM run_idempotency WHERE scope=? AND idempotency_key=?", (stale_scope, stale_key))
+                    "DELETE FROM run_idempotency WHERE scope=? AND idempotency_key=? AND run_id NOT IN (SELECT run_id FROM run_queue_inputs)", (stale_scope, stale_key))
 
     def status_for_run(self, scope: str, run_id: str, *, retention_until: float = 0) -> dict[str, Any] | None:
         """Load one durable run status inside its authenticated scope."""
