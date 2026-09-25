@@ -56,18 +56,30 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
-          version: "0.9.28"
+          version: "0.11.6"
 
       - name: Run the Hermes gateway contracts
         working-directory: hermes
         run: |
-          uv sync --locked --python 3.11 --extra dev --extra messaging
+          uv sync --locked --python 3.13 --extra dev --extra messaging
           scripts/run_tests.sh \
             tests/gateway/test_session_api.py \
             tests/gateway/test_api_server_compaction_projection.py \
             tests/gateway/test_api_server.py \
             tests/gateway/test_api_server_runs.py \
             tests/gateway/test_api_server_run_queue.py \
+            tests/gateway/test_api_server_memory_sessions.py \
+            tests/gateway/test_api_server_multiplex_secret_scope.py \
+            tests/cron/test_automation_memory_policy.py \
+            tests/gateway/test_webhook_adapter.py \
+            tests/hermes_cli/test_webhook_cli.py \
+            tests/agent/test_memory_recall_events.py \
+            tests/agent/test_memory_provider.py \
+            tests/agent/test_turn_context.py \
+            tests/agent/test_secret_scope.py \
+            tests/agent/test_cross_process_turn_lease.py \
+            tests/test_session_maintenance_active_turns.py \
+            tests/tools/test_cronjob_tools.py \
             -q
           if [ -f tests/tools/test_scoped_vault_live_env.py ]; then
             scripts/run_tests.sh \
