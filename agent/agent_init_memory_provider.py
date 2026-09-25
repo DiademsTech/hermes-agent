@@ -108,6 +108,7 @@ def _memory_provider_init_kwargs(agent, platform) -> dict[str, Any]:
     kwargs = {
         "session_id": agent.session_id,
         "platform": platform or "cli",
+        "auto_retain": getattr(agent, "_memory_auto_retain", True),
         "hermes_home": str(get_hermes_home()),
         # platform="cron" (scheduler) / "subagent" (delegate_task) → providers skip writes (MemoryProvider.initialize);
         # a fork that loads a provider only for the checkpoint gate names its scope (memory_agent_context).

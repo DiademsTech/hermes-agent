@@ -809,6 +809,7 @@ class WebhookAdapter(BasePlatformAdapter):
         self._delivery_info_order.append((now, session_chat_id))
         self._prune_delivery_info(now)
         source = self._admission_source(route_name, profile, delivery_id)
+        source.memory_auto_retain = route_config.get("memory_auto_retain", False) is True
         event = MessageEvent(text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload,
                              message_id=delivery_id, timestamp=datetime.fromtimestamp(0, UTC))
         from gateway.platforms.webhook_ingress import admit_producer

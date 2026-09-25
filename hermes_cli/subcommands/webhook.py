@@ -1,6 +1,7 @@
 """``hermes webhook`` subcommand parser."""
 
 from __future__ import annotations
+from argparse import BooleanOptionalAction
 
 from typing import Callable
 
@@ -20,6 +21,7 @@ def build_webhook_parser(subparsers, *, cmd_webhook: Callable) -> None:
         "--prompt", default="", help="Prompt template with {dot.notation} payload refs")
     wh_sub.add_argument("--events", default="", help="Comma-separated event types to accept")
     wh_sub.add_argument("--description", default="", help="What this subscription does")
+    wh_sub.add_argument("--memory-auto-retain", action=BooleanOptionalAction, default=None)
     wh_sub.add_argument("--skills", default="", help="Comma-separated skill names to load")
     wh_sub.add_argument(
         "--deliver", default="log", help="Delivery target: log, telegram, discord, slack, etc.")

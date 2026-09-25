@@ -102,6 +102,7 @@ class GatewayBackgroundMixin:
                     provider_data_collection=pr.get("data_collection"),
                     session_id=task_id,
                     platform=platform_key,
+                    memory_auto_retain=getattr(source, "memory_auto_retain", True) is True,
                     **{k: getattr(source, k) for k in (
                         "user_id", "user_id_alt", "user_name", "chat_id", "chat_name", "chat_type", "thread_id",
                     )},

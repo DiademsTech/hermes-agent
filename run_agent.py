@@ -268,7 +268,7 @@ class AIAgent(
         chat_id: str | None = None, chat_name: str | None = None, chat_type: str | None = None, thread_id: str | None = None,
         gateway_session_key: str | None = None,
         skip_context_files: bool = False, load_soul_identity: bool = False,
-        skip_memory: bool = False, skip_background_review: bool = False,
+        skip_memory: bool = False, memory_auto_retain: bool = True, skip_background_review: bool = False,
         session_db=None, parent_session_id: str | None = None,
         iteration_budget: IterationBudget = None, run_budget_seconds: Optional[float] = None,
         fallback_model: dict[str, Any] | None = None, credential_pool=None,
