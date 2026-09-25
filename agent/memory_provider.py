@@ -58,6 +58,7 @@ class RecallStatus:
     provider_label: str
     count: int
     glyph: str = INDICATOR_GLYPH
+    memories: tuple[str, ...] | None = None
 
 
 # Prompts with no semantic signal; single source of truth for the core prefetch gate and
@@ -129,6 +130,10 @@ class MemoryProvider(ABC):
         """What the most recent :meth:`prefetch` injected (``None`` = no indicator). Must reflect
         only the LAST prefetch, never a stale prior count."""
         return None
+
+    def recall_receipt(self) -> Optional[RecallStatus]:
+        """Last injected memories, independent of the optional textual indicator."""
+        return self.recall_status()
 
     def sync_turn(
         self, user_content: str, assistant_content: str, *,
