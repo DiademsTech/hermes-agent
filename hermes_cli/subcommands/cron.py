@@ -1,6 +1,7 @@
 """``hermes cron`` subcommand parser."""
 
 from __future__ import annotations
+from argparse import BooleanOptionalAction
 
 import argparse
 from typing import Callable
@@ -51,6 +52,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "--deliver). 'local' suppresses failure notices entirely; run "
             "state stays visible in `hermes cron list`. Omit = failures "
             "follow --deliver.")
+    cron_create.add_argument("--memory-auto-retain", action=BooleanOptionalAction, default=False)
     cron_create.add_argument("--repeat", type=int, help="Optional repeat count")
     _add_catch_up(cron_create)
     cron_create.add_argument("--skill", dest="skills", action="append",
@@ -126,6 +128,7 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
     cron_edit.add_argument("--failure-deliver", dest="failure_deliver",
         help="Override target for failure notices (same grammar as --deliver; "
             "'local' suppresses; '' clears the override)")
+    cron_edit.add_argument("--memory-auto-retain", action=BooleanOptionalAction, default=None)
     cron_edit.add_argument("--repeat", type=int, help="New repeat count")
     _add_catch_up(cron_edit)
     cron_edit.add_argument("--skill", dest="skills", action="append",

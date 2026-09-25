@@ -49,6 +49,8 @@ _api_request_profile: ContextVar[Optional[str]] = ContextVar(
 _STATIC_FEATURE_FLAGS = {
     "automation_failure_delivery_policy": True,
     "run_guardrail_halt_incomplete": True,
+    "run_events_memory_recall": True, "run_events_memory_recall_details": True,
+    "automation_memory_auto_retain": True,
     "session_messages_include_compacted": True,
     "session_auto_prune_idle_guard": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
