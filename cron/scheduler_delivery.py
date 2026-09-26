@@ -1059,9 +1059,12 @@ def _expand_routing_tokens(part: str) -> List[str]:
 
 def _delivery_lane_value(job: dict, *, for_failure: bool = False):
     """Raw deliver-lane value for a run outcome: the failure lane when ``for_failure`` and the job
-    overrides it, else ``deliver``. Bookkeeping (outcome classification, unresolved-origin, incident
+    overrides it, else ``deliver``. The profile automation-failure policy forces ``local``. Bookkeeping (outcome classification, unresolved-origin, incident
     'alerted' marking) must read the SAME lane the notice was routed through (NS-788)."""
     if for_failure:
+        from gateway.warning_notifications import automation_failure_messages_suppressed
+        if automation_failure_messages_suppressed("cron"):
+            return "local"
         failure_deliver = job.get("failure_deliver")
         if failure_deliver is not None and str(failure_deliver).strip():
             return failure_deliver

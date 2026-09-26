@@ -25,7 +25,7 @@ from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome
 from gateway.platforms.event import MessageEvent
 from gateway.response_filters import display_kind_for_event, is_machinery_display_kind
-from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted
+from gateway.warning_notifications import diagnostic_metadata, diagnostic_turn_muted, diagnostic_wake_muted, mute_automation_failure
 from gateway.session import (
     SessionSource, _session_key_namespace, build_channel_continuity_note,
     build_session_context,
@@ -1926,6 +1926,9 @@ class GatewayTurnMixin:
     ):
         """Final delivery decisions: intentional silence, voice reply, streamed-turn media/footer.
         Returns the text for the adapter to send, or ``None`` when already delivered."""
+        if (agent_result.get("failed") or agent_result.get("interrupted")) and mute_automation_failure(event):
+            # The transcript was persisted before this delivery boundary. No voice/media/footer escapes.
+            return None
         if diagnostic_wake_muted(event):
             return None
         # Intentional silence is a delivery decision: the [SILENT] turn stays persisted (alternation).
@@ -2256,7 +2259,8 @@ class GatewayTurnMixin:
             )
 
         except Exception as e:
-            return await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
+            response = await self._hmwa_agent_error_reply(e, event, source, session_entry, session_key, prepared)
+            return None if mute_automation_failure(event) else response
         finally:
             # Restore session context variables to their pre-handler state
             self._clear_session_env(_session_env_tokens)
