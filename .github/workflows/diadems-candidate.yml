@@ -84,6 +84,8 @@ jobs:
           if [ -f tests/gateway/test_automation_failure_delivery.py ]; then
             scripts/run_tests.sh \
               tests/gateway/test_automation_failure_delivery.py \
+              tests/agent/test_tool_call_guardrail_runtime.py \
+              tests/agent/test_turn_finalizer_iteration_limit_exit.py \
               tests/cron/test_failure_delivery_policy.py \
               tests/cron/test_cron_failure_deliver.py \
               tests/gateway/test_warning_notifications.py \
