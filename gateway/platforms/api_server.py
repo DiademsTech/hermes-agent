@@ -48,6 +48,7 @@ _api_request_profile: ContextVar[Optional[str]] = ContextVar(
 # /v1/capabilities static feature flags (order is part of the JSON shape).
 _STATIC_FEATURE_FLAGS = {
     "automation_failure_delivery_policy": True,
+    "run_guardrail_halt_incomplete": True,
     "session_messages_include_compacted": True,
     "session_auto_prune_idle_guard": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
