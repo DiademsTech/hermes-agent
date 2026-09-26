@@ -520,6 +520,8 @@ def finalize_turn(
         final_response is not None
         and not failed
         and not interrupted
+        # A guardrail explanation is diagnostic output, not a finished task.
+        and _turn_exit_reason != "guardrail_halt"
         and (api_call_count < agent.max_iterations or str(_turn_exit_reason).startswith("text_response("))
     )
 

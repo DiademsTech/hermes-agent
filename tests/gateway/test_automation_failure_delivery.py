@@ -14,7 +14,7 @@ from gateway.session import SessionSource
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize("platform", [Platform.WEBHOOK, Platform.TELEGRAM])
-@pytest.mark.parametrize("outcome", ["success", "failed", "interrupted", "exception"])
+@pytest.mark.parametrize("outcome", ["success", "failed", "interrupted", "guardrail", "exception"])
 async def test_failure_policy_at_outbound_boundary(tmp_path, monkeypatch, enabled, platform, outcome):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(
@@ -31,6 +31,9 @@ async def test_failure_policy_at_outbound_boundary(tmp_path, monkeypatch, enable
     source = SessionSource(platform=platform, chat_id="automation", user_id="test")
     event = MessageEvent(text="Process the event", source=source)
     result = {outcome: True} if outcome in {"failed", "interrupted"} else {}
+    if outcome == "guardrail":
+        result = {"completed": False, "turn_exit_reason": "guardrail_halt"}
+    original_result = result.copy()
     # Identical text must survive on success: the policy never pattern-matches content.
     text = "HTTP 402: balance exhausted"
 
@@ -51,7 +54,7 @@ async def test_failure_policy_at_outbound_boundary(tmp_path, monkeypatch, enable
         assert (kwargs["content"] if "content" in kwargs else args[1]) == text
     expected = ProcessingOutcome.FAILURE if muted or outcome == "exception" else ProcessingOutcome.SUCCESS
     adapter.on_processing_complete.assert_awaited_once_with(event, expected)
-    assert result == ({outcome: True} if outcome in {"failed", "interrupted"} else {})
+    assert result == original_result
 
     # A later successful turn may reuse the event; a suppressed failure must not poison it.
     if muted:

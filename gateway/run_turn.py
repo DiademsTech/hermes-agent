@@ -1926,7 +1926,10 @@ class GatewayTurnMixin:
     ):
         """Final delivery decisions: intentional silence, voice reply, streamed-turn media/footer.
         Returns the text for the adapter to send, or ``None`` when already delivered."""
-        if (agent_result.get("failed") or agent_result.get("interrupted")) and mute_automation_failure(event):
+        if (
+            agent_result.get("failed") or agent_result.get("interrupted")
+            or agent_result.get("partial") or agent_result.get("completed") is False
+        ) and mute_automation_failure(event):
             # The transcript was persisted before this delivery boundary. No voice/media/footer escapes.
             return None
         if diagnostic_wake_muted(event):

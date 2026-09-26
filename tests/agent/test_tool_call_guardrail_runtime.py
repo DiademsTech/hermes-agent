@@ -438,6 +438,12 @@ def test_guardrail_halt_emits_final_response_through_stream_delta_callback():
         result = agent.run_conversation("search repeatedly")
 
     assert result["turn_exit_reason"] == "guardrail_halt"
+    assert result["completed"] is False
+    from gateway.platforms.api_server_runs import terminal_run_status
+
+    status, fields = terminal_run_status(result)
+    assert status == "failed"
+    assert fields["turn_exit_reason"] == "guardrail_halt"
     halt_text = result["final_response"]
     assert halt_text
 
