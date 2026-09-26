@@ -628,6 +628,10 @@ class GatewayTurnPersistenceMixin:
     ):
         """Final delivery decisions: intentional silence, voice reply, streamed-turn media/footer.
         Returns the text for the adapter to send, or ``None`` when already delivered."""
+        from gateway.warning_notifications import mute_automation_failure
+        if (agent_result.get("failed") or agent_result.get("interrupted")) and mute_automation_failure(event):
+            # Persistence precedes delivery; failed automation output stays local.
+            return None
         if diagnostic_wake_muted(event):
             return None
         # Intentional silence is a delivery decision: the [SILENT] turn stays persisted (alternation).

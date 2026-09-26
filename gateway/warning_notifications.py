@@ -1,4 +1,4 @@
-"""Delivery policy for engine diagnostics, never assistant or command responses."""
+"""Delivery policies for engine diagnostics and classified automation failures."""
 
 from gateway.display_config import resolve_display_setting
 
@@ -99,3 +99,28 @@ def warning_notifications_enabled(platform, user_config=None) -> bool:
         user_config = {}
     platform_key = getattr(platform, "value", platform)
     return not resolve_display_setting(user_config, platform_key, "suppress_warning_notifications", False)
+
+
+def automation_failure_messages_suppressed(platform, user_config=None) -> bool:
+    """Opt-in final-failure policy, restricted to webhook and cron execution surfaces.
+
+    Call only after a trusted failure outcome; never infer failures from response text.
+    The caller binds the owning profile. Persistence and retries stay outside this policy.
+    """
+    platform_key = getattr(platform, "value", platform)
+    if platform_key not in {"webhook", "cron"}:
+        return False
+    if user_config is None:
+        user_config = effective_user_config()
+    return bool(resolve_display_setting(
+        user_config if isinstance(user_config, dict) else {}, platform_key,
+        "suppress_automation_failure_messages", False,
+    ))
+
+
+def mute_automation_failure(event) -> bool:
+    """Mark a known failed turn as undelivered without changing its failure outcome."""
+    if not automation_failure_messages_suppressed(event.source.platform):
+        return False
+    event._automation_failure_suppressed = True
+    return True

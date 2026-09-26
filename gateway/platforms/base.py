@@ -439,7 +439,7 @@ from gateway.platforms.base_exec_approval import (
 from gateway.platforms.base_streaming_tts import (
     AudioFormat, StreamingTTSHandle, streaming_tts_should_skip_whole_file, streaming_tts_turn_key)
 from gateway.platforms.event import MessageEvent, MessageType, ProcessingOutcome
-from gateway.warning_notifications import diagnostic_wake_muted
+from gateway.warning_notifications import diagnostic_wake_muted, mute_automation_failure
 from hermes_cli.observability.shared_metrics_gateway import records_delivery, stop_reply_clock
 from hermes_cli.home_data_layout import SECRET_CACHE_STORES
 from gateway.session import SessionSource, build_session_key
@@ -4332,7 +4332,7 @@ class BasePlatformAdapter(ABC):
             # Only the policy reads bind the routed profile; the send stays in the launch scope
             # as before, so delivery bookkeeping keeps landing where boot-time recovery reads it.
             with self._media_delivery_scope(event.source):
-                content = None if diagnostic_wake_muted(event) else self.warning_text(
+                content = None if (mute_automation_failure(event) or diagnostic_wake_muted(event)) else self.warning_text(
                     t("gateway.notify.turn_error_detailed", error_type=type(e).__name__, error_detail=error_detail),
                     t("gateway.notify.turn_error"),
                     logical_platform=event.source.platform, chat_id=event.source.chat_id, metadata=_thread_metadata)
@@ -4461,6 +4461,7 @@ class BasePlatformAdapter(ABC):
 
     async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
         """Background task that actually processes the message."""
+        event._automation_failure_suppressed = False  # this event may be reused for a later turn
         delivery_attempted = delivery_succeeded = False  # feeds the processing-complete hook
 
         def _record_delivery(result):
@@ -4538,7 +4539,8 @@ class BasePlatformAdapter(ABC):
                     anything_sent=delivery_attempted or _tts_caption_delivered,
                     record_delivery=_record_delivery)
             await self._release_turn_marker(event)
-            processing_ok = delivery_succeeded if delivery_attempted else not bool(response)
+            processing_ok = (not getattr(event, "_automation_failure_suppressed", False)
+                             and (delivery_succeeded if delivery_attempted else not bool(response)))
             # Clean up the per-turn streaming-TTS flag.
             self._streaming_tts_completed_turns.discard(self._streaming_tts_turn_key(
                 session_key, getattr(interrupt_event, "_hermes_run_generation", None),
