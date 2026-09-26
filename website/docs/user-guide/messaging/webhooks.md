@@ -701,3 +701,16 @@ This is the same trust model that applies to everything the agent reads: web pag
 | `WEBHOOK_ENABLED` | Enable the webhook platform adapter | `false` |
 | `WEBHOOK_PORT` | HTTP server port for receiving webhooks | `8644` |
 | `WEBHOOK_SECRET` | Global HMAC secret (used as fallback when routes don't specify their own) | _(none)_ |
+
+### Keep failed automation results local
+
+Set `display.suppress_automation_failure_messages: true` in the owning profile's
+`config.yaml` to withhold failed or interrupted webhook results and cron failure
+notifications from their delivery targets. Successful results still use their
+configured destinations. Execution history, logs, and cron retry decisions remain
+unchanged. The default is `false`; interactive chat errors are unaffected.
+
+This controls final delivery, not tool side effects or content already streamed.
+For webhook targets that should receive only completed results, also disable
+`streaming`, `interim_assistant_messages`, and `long_running_notifications` under
+`display.platforms.webhook`.

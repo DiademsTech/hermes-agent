@@ -67,6 +67,7 @@ _BROWSER_CONTROL_PROTOCOL_VERSION = 1
 _STATIC_FEATURE_FLAGS = {
     "run_events_memory_recall": True, "run_events_memory_recall_details": True,
     "automation_memory_auto_retain": True,
+    "automation_failure_delivery_policy": True,
     "run_queue": True, "run_queue_controls": True, "run_events_message_interim": True,
     "vault_scope_only_passthrough": True,
     "session_messages_include_compacted": True,
