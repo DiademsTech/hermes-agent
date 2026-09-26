@@ -81,6 +81,14 @@ jobs:
             tests/test_session_maintenance_active_turns.py \
             tests/tools/test_cronjob_tools.py \
             -q
+          if [ -f tests/gateway/test_automation_failure_delivery.py ]; then
+            scripts/run_tests.sh \
+              tests/gateway/test_automation_failure_delivery.py \
+              tests/cron/test_failure_delivery_policy.py \
+              tests/cron/test_cron_failure_deliver.py \
+              tests/gateway/test_warning_notifications.py \
+              -q
+          fi
           if [ -f tests/tools/test_scoped_vault_live_env.py ]; then
             scripts/run_tests.sh \
               tests/tools/test_scoped_vault_live_env.py \
