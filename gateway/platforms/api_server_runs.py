@@ -349,6 +349,7 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
             def publish_subagent():
                 current = self._run_statuses.get(run_id)
                 if current is None:
+                    _push(event)
                     return
                 receipt = {k: v[:12000] if isinstance(v, str) else v for k, v in event.items()
                            if k not in {"output_tail", "cost_usd", "files_read", "files_written"}}
