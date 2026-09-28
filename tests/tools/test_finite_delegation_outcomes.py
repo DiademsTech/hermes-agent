@@ -205,6 +205,17 @@ def test_finite_marker_overrides_api_history_continuation(harness):
     _joined(result, ["completed", "error"])
 
 
+def test_api_inline_batch_joins_parallel_children_before_returning(harness, monkeypatch):
+    _parent, children, dispatch = harness
+    monkeypatch.delenv("HERMES_SINGLE_QUERY_SESSION")
+    sc.set_session_vars(platform="api_server", chat_id="api-inline",
+                        session_key="api-inline", session_id="api-inline",
+                        session_history_delivery="", async_delivery=False)
+    result = dispatch("completed", "completed")
+    _joined(result, ["completed", "completed"])
+    assert all(child.finished.is_set() and child.closed.is_set() for child in children)
+
+
 @pytest.mark.parametrize("marker", [None, "0", "false"])
 @pytest.mark.parametrize("api_history", [False, True])
 def test_nonfinite_marker_preserves_background_dispatch(harness, monkeypatch, marker, api_history):

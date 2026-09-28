@@ -235,7 +235,7 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, 
         status != previous_status
         or status in TERMINAL_STATUSES
         or bool(field_names & {
-            "output", "error", "usage", "pending_steer", "session_id", "shutdown_requested_at"}))
+            "output", "error", "usage", "pending_steer", "session_id", "shutdown_requested_at", "subagents"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
@@ -338,7 +338,31 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
                     # Free text may carry child tool output: force secret redaction on this public stream.
                     redact = key in _SUBAGENT_TEXT_KEYS and isinstance(value, str)
                     event[key] = redact_sensitive_text(value, force=True) if redact else value
-            _push(event)
+            # A reconnect/status-only consumer may have missed the destructive SSE
+            # queue. Keep bounded lifecycle receipts, never child output or paths.
+            def publish_subagent():
+                current = self._run_statuses.get(run_id)
+                if current is None:
+                    return
+                receipt = {k: v[:12000] if isinstance(v, str) else v for k, v in event.items()
+                           if k not in {"output_tail", "cost_usd", "files_read", "files_written"}}
+                for key in ("files_read", "files_written"):
+                    value = event.get(key)
+                    if isinstance(value, list):
+                        receipt[key] = len(value)
+                    elif type(value) is int and value >= 0:
+                        receipt[key] = value
+                receipts = list(current.get("subagents") or [])
+                identity = receipt.get("subagent_id") or receipt.get("child_session_id")
+                index = next((i for i, item in enumerate(receipts)
+                              if identity and identity == (item.get("subagent_id") or item.get("child_session_id"))), None)
+                if index is None:
+                    receipts.append(receipt)
+                else:
+                    receipts[index] = {**receipts[index], **receipt}
+                self._set_run_status(run_id, current["status"], subagents=receipts[-32:])
+                _push(event)
+            loop.call_soon_threadsafe(publish_subagent)
 
     return _callback
 
@@ -671,6 +695,9 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     queue_mode = body.get("queue", False)
     if not isinstance(queue_mode, bool):
         return web.json_response(_openai_error("'queue' must be a boolean"), status=400)
+    background_delegations = body.get("background_delegations", True)
+    if not isinstance(background_delegations, bool):
+        return web.json_response(_openai_error("'background_delegations' must be a boolean"), status=400)
     if queue_mode and self._room_grant_token(request):
         return web.json_response(_openai_error("Queue requires a profile API credential"), status=403)
     if queue_mode and not self._run_idempotency_store.durable:
@@ -722,7 +749,9 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     # nothing persisted to load yet.  Wake authority is fixed here, before the load can
     # overwrite ``conversation_history``: a caller-supplied history is authoritative for this
     # turn, never consumes the SessionDB delivery row, and is denied on the same contract.
-    session_history_delivery = not previous_response_id and not conversation_history
+    # Clients without a later-turn consumer can join native parallel delegations in this
+    # run. This only narrows detached delivery; loading server history stays unchanged.
+    session_history_delivery = background_delegations and not previous_response_id and not conversation_history
     if not queue_mode and not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
     session_ids = await _queue_session_ids(self, session_id)

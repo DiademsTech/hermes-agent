@@ -69,6 +69,8 @@ _STATIC_FEATURE_FLAGS = {
     "automation_memory_auto_retain": True,
     "automation_failure_delivery_policy": True,
     "run_guardrail_halt_incomplete": True,
+    "run_inline_delegations": True,
+    "run_subagent_status": True,
     "run_queue": True, "run_queue_controls": True, "run_events_message_interim": True,
     "vault_scope_only_passthrough": True,
     "session_messages_include_compacted": True,
