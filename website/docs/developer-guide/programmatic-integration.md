@@ -148,6 +148,23 @@ GET  /health, /health/detailed
 
 Setup, headers (`X-Hermes-Session-Id`, `X-Hermes-Session-Key`), and frontend wiring: [API Server](../user-guide/features/api-server).
 
+Servers advertising `run_inline_delegations` accept a boolean
+`background_delegations` in `POST /v1/runs` (default `true`). Set it to `false`
+when the client needs delegated results in the current turn: `delegate_task`
+uses its native synchronous join, including for parallel children, before the
+parent continues. Server-side session history, FIFO admission, approval and stop
+handling remain unchanged. The option does not start another model turn after
+a final response. Detached API completions are otherwise persisted for a later
+client turn; an active session lease defers delivery without spending its retry
+budget.
+
+With `run_subagent_status`, run status includes up to 32 latest `subagents`
+lifecycle receipts, merged by child identity. These recover missed
+`subagent.start` / `subagent.complete` events without a second SSE consumer.
+Free text is redacted and bounded; file paths, output tails and provider costs
+are excluded (file counts remain available). Receipts follow the run's existing
+retention and access controls; this is not a permanent subagent transcript.
+
 Browser extensions can opt into the disabled-by-default controller protocol to
 drive the exact browser session that opened the Hermes conversation. The API
 and dashboard transports share one principal-bound broker and one explicit
