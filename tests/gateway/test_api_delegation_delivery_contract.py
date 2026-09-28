@@ -48,6 +48,10 @@ async def test_detached_dispatch_requires_a_declared_consumer(monkeypatch):
         assert runs[name]["runtime"]["history"] == [{"role": "user", "content": "caller snapshot"}]
     assert runs["session"]["runtime"]["target"] == "child"
     assert runs["session"]["runtime"]["history"] == result["resumed_history"]
+    assert runs["detached"]["runtime"]["target"] == "child"
+    for name in ("inline", "inline_queued"):
+        assert runs[name]["runtime"]["target"] is None
+        assert runs[name]["runtime"]["history"] == result["resumed_history"]
     assert runs["declared_key"]["runtime"]["target"] == "declared"
     assert runs["declared_key"]["runtime"]["history"][0]["content"] == "DECLARED_HISTORY"
 
@@ -87,4 +91,62 @@ async def test_delivery_replay_is_atomic_across_continuation_and_busy_turn(tmp_p
         assert db.get_messages("other") == []
     finally:
         peer.close()
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_status_recovers_bounded_subagents_without_sse_or_private_output():
+    from gateway.config import PlatformConfig
+
+    api = APIServerAdapter(PlatformConfig())
+    api._set_run_status("run-recovery", "running")
+    emit = api._make_run_event_callback("run-recovery", asyncio.get_running_loop())
+    for i in range(40):
+        emit("subagent.start", subagent_id=f"child-{i}", goal="g" * 15000)
+    emit("subagent.complete", subagent_id="child-39", status="completed",
+         summary="review finished", files_read=["/private/file"], output_tail="private-output", cost_usd=9)
+    await asyncio.sleep(0)  # drain the event-loop publication callbacks
+    status = api._set_run_status("run-recovery", "completed", output="parent consumed review")
+    assert len(status["subagents"]) == 32
+    last = status["subagents"][-1]
+    assert last["event"] == "subagent.complete" and last["status"] == "completed"
+    assert last["summary"] == "review finished" and last["files_read"] == 1
+    assert len(last["goal"]) == 12000
+    assert "private-output" not in str(status) and "/private/file" not in str(status)
+    assert "cost_usd" not in last
+
+
+@pytest.mark.asyncio
+async def test_busy_api_delivery_refunds_attempts_until_the_turn_releases(tmp_path):
+    import time
+    from gateway.config import GatewayConfig, Platform, PlatformConfig
+    from gateway.run import GatewayRunner
+    from tools import async_delegation as delegation
+
+    runner = GatewayRunner(GatewayConfig())
+    api = APIServerAdapter(PlatformConfig())
+    db = SessionDB(tmp_path / "delivery.db")
+    db.create_session("busy-parent", source="api_server")
+    api._ensure_session_db = lambda: db
+    runner.adapters = {Platform.API_SERVER: api}
+    evt = {"type": "async_delegation", "session_key": "busy-parent",
+           "origin_session_id": "busy-parent", "delegation_id": "busy-unit",
+           "status": "completed", "summary": "review finished", "dispatched_at": time.time()}
+    delegation._persist_dispatch(evt)
+    delegation._persist_completion(evt, {"status": "completed", "summary": "review finished"})
+    try:
+        assert db.acquire_session_turn_lease("busy-parent", "client-turn", wait_seconds=0)
+        for _ in range(10):
+            assert await runner._deliver_async_delegation_group([evt]) is False
+            row = delegation.get_durable_delegation("busy-unit")
+            assert (row["delivery_state"], row["delivery_attempts"]) == ("pending", 0)
+        assert db.get_messages("busy-parent") == []
+        db.release_session_turn_lease("busy-parent", "client-turn")
+        assert await runner._deliver_async_delegation_group([evt]) is True
+        await runner._deliver_async_delegation_group([evt])
+        assert len(db.get_messages("busy-parent")) == 1
+        assert delegation.get_durable_delegation("busy-unit")["delivery_state"] == "delivered"
+        assert not api._active_run_tasks and not api._background_tasks
+    finally:
+        db.release_session_turn_lease("busy-parent", "client-turn")
         db.close()

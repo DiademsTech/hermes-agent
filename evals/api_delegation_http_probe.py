@@ -80,6 +80,9 @@ async def probe():
         db.append_message("declared", "assistant", "DECLARED_HISTORY")
         for name, body, extra_headers in (
             ("session", {"session_id": "parent"}, {}),
+            ("inline", {"session_id": "parent", "background_delegations": False}, {}),
+            ("inline_queued", {"session_id": "parent", "background_delegations": False, "queue": True}, {"Idempotency-Key": "inline-queue"}),
+            ("detached", {"session_id": "parent", "background_delegations": True}, {}),
             ("caller_history", {"session_id": "parent", "conversation_history": snapshot}, {}),
             ("response_chain", {"previous_response_id": "resp-seed"}, {}),
             ("declared_key", {}, {"X-Hermes-Session-Key": "fixture-key"}),
@@ -92,6 +95,7 @@ async def probe():
                     await asyncio.sleep(0.01)
             if response.status == 202:
                 await asyncio.wait_for(wait_for_run(), 10)
+                await asyncio.gather(*list(adapter._active_run_tasks.values()))
             runs.append({"name": name, "status": response.status, "runtime": captured[-1] if len(captured) > count else None})
     result = {"requests": records, "runs": runs, "delivery_error": delivery_error, "unsolicited_calls": calls_after-calls_before, "resumed_history": resumed_history, "durable_child_rows": len(db.get_messages("child"))}
     db.close()
