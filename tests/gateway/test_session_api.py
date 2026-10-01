@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -111,6 +112,37 @@ async def test_get_session_projects_delegate_provenance_without_model_config(
     assert branch["is_internal_child"] is False
     assert "model_config" not in child
     assert "must-not-leak" not in str(child)
+
+
+@pytest.mark.asyncio
+async def test_session_index_does_not_hydrate_prompts(adapter, session_db):
+    """The list must retain presence flags without reading the large prompt store."""
+    session_db.create_session("with-prompt", "api_server", system_prompt="private prompt " * 5000,
+                              model_config={"provider": "example"})
+    session_db.create_session("without-prompt", "api_server")
+    assert session_db.set_session_pinned("with-prompt", True)
+    def guarded_read(sql, params=()):
+        with session_db._read_ctx() as conn:
+            def authorize(action, table, column, *_):
+                if action == sqlite3.SQLITE_READ and table == "system_prompts" and column == "prompt":
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+            conn.set_authorizer(authorize)
+            try:
+                return conn.execute(sql, params).fetchall()
+            finally:
+                conn.set_authorizer(None)
+
+    with patch.object(session_db, "_read_all", side_effect=guarded_read):
+        async with TestClient(TestServer(_create_session_app(adapter))) as cli:
+            response = await cli.get("/api/sessions")
+            assert response.status == 200
+            rows = {row["id"]: row for row in (await response.json())["data"]}
+    assert rows["with-prompt"]["has_system_prompt"] is True
+    assert rows["with-prompt"]["has_model_config"] is True
+    assert rows["with-prompt"]["pinned"] is True
+    assert rows["without-prompt"]["has_system_prompt"] is False
+    assert all("system_prompt" not in row and "model_config" not in row for row in rows.values())
 
 
 @pytest.mark.asyncio
@@ -1460,5 +1492,3 @@ async def test_session_messages_rejects_invalid_include_compacted(adapter, sessi
         payload = await resp.json()
 
     assert payload["error"]["code"] == "invalid_session_query"
-
-
