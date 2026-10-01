@@ -2781,7 +2781,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             from tools.skills_tool import _find_all_skills, _sort_skills
             skills = _sort_skills(
                 _find_all_skills(
-                    skip_disabled=False, include_editorial=True
+                    skip_disabled=False
                 )
             )
         except Exception:
@@ -2846,7 +2846,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         payload.update(
             {f: bool(payload[f]) for f in ("pinned", "archived", "hidden") if f in payload})
         # Full system prompts / model_config never cross the client API; only their presence.
-        payload["has_system_prompt"] = bool(session.get("system_prompt"))
+        payload["has_system_prompt"] = bool(session.get("has_system_prompt", session.get("system_prompt")))
         payload["has_model_config"] = bool(session.get("model_config"))
         return payload
 
@@ -2917,7 +2917,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             rows = await asyncio.to_thread(
                 db.list_sessions_rich, source=source, limit=limit, offset=offset,
                 include_children=include_children, order_by_last_active=True, include_pinned=True,
-                search_query=title_filter, include_hidden=include_hidden)
+                search_query=title_filter, include_hidden=include_hidden, compact_rows=True)
             if title_filter:
                 rows = [s for s in rows if (s.get("title") or "").strip() == title_filter]
             return rows

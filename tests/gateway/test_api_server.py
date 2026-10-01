@@ -932,6 +932,7 @@ class TestSkillsEndpoint:
         with patch(
             "tools.skills_tool._find_all_skills",
             return_value=list(fake_skills),
+            autospec=True,
         ):
             app = _create_app(adapter)
             async with TestClient(TestServer(app)) as cli:
