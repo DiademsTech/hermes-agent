@@ -243,11 +243,44 @@ def check_state_db_integrity(home: Optional[Path] = None) -> str:
     return "check-failed: no result" if not row or row[0] is None else str(row[0])
 
 
+# The torn b-tree the unclean-exit check hunts for is a WAL failure: a SIGKILL mid-checkpoint
+# (2026-08-31). Rollback-journal stores are recovered by SQLite itself — each page's original
+# image reaches the on-disk journal before the page is overwritten, and the next connection to
+# open the store (SessionDB's, or the probe below) rolls the hot journal back before reading.
+# Scanning them buys nothing and costs a whole-store pass under a SHARED lock before the API port
+# binds: minutes on a multi-GB store. Never defer it to the background either: that lock would
+# block every commit for as long. WAL is persistent (file header); rollback modes are
+# per-connection, so a fresh connection reports them as SQLite's ``delete`` default.
+_ROLLBACK_JOURNAL_MODES = frozenset({"delete", "truncate", "persist"})
+_ROLLBACK_JOURNAL_VERDICT = "skipped: rollback journal"
+
+
+def state_db_journal_mode(home: Optional[Path] = None) -> Optional[str]:
+    """Journal mode a fresh connection reports for ``state.db``; ``None`` when absent or
+    unreadable, so the caller keeps the integrity check.  Never raises."""
+    path = _home_path(home, "state.db")
+    if not path.exists():
+        return None
+    try:
+        from hermes_state_wal import _on_disk_journal_mode
+
+        with closing(sqlite3.connect(str(path))) as conn:
+            return _on_disk_journal_mode(conn)
+    except Exception:
+        return None
+
+
 def _report_unclean_exit(evidence: Dict[str, Any], home: Optional[Path]) -> None:
-    """Integrity-check the store, persist the exit-diag record, log at WARNING."""
-    # The death may have torn the store; this is the only moment we know to look.
-    verdict = evidence["state_db_integrity"] = check_state_db_integrity(home=home)
-    if verdict not in ("ok", "absent"):
+    """Integrity-check a WAL store, persist the exit-diag record, log at WARNING."""
+    # The death may have torn a WAL store; this is the only moment we know to look.
+    journal_mode = evidence["state_db_journal_mode"] = state_db_journal_mode(home)
+    if journal_mode in _ROLLBACK_JOURNAL_MODES:
+        verdict = evidence["state_db_integrity"] = _ROLLBACK_JOURNAL_VERDICT
+        logger.info("state.db keeps a rollback journal (%s): SQLite restores it on open after an "
+                    "unclean exit, so the unclean-exit quick_check is skipped.", journal_mode)
+    else:
+        verdict = evidence["state_db_integrity"] = check_state_db_integrity(home=home)
+    if verdict not in ("ok", "absent", _ROLLBACK_JOURNAL_VERDICT):
         logger.error(
             "state.db FAILED integrity check after an unclean gateway exit: %s — sessions may read as "
             "missing until it is repaired. Run `hermes doctor`.",
