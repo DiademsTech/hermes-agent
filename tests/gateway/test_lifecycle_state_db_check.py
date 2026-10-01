@@ -9,7 +9,9 @@ it on 2026-08-30 17:15 and surfaced as "Session not found".
 ``record_startup`` already detects the unclean exit and logs "SIGKILL / OOM /
 VM death" — it just never looked at the database that death may have torn.
 The check is gated on the unclean exit precisely because it costs ~2s on a
-500MB store; a clean boot must not pay it.
+500MB store; a clean boot must not pay it. It is also gated on WAL: a
+rollback-journal store is restored by SQLite on open (see
+test_lifecycle_unclean_check_journal_mode.py).
 """
 from __future__ import annotations
 
@@ -40,10 +42,12 @@ def _write_sentinel(home: Path, phase: str = "running") -> None:
     )
 
 
-def _make_state_db(home: Path, *, corrupt: bool) -> Path:
+def _make_state_db(home: Path, *, corrupt: bool, wal: bool = False) -> Path:
     """Build a real SQLite file, optionally with a genuinely torn b-tree page."""
     path = home / "state.db"
     conn = sqlite3.connect(path)
+    if wal:  # the unclean-exit path only scans WAL stores
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("CREATE TABLE sessions (id INTEGER PRIMARY KEY, v TEXT)")
     conn.executemany(
         "INSERT INTO sessions (v) VALUES (?)", [(f"row-{i}" * 40,) for i in range(4000)]
@@ -87,7 +91,7 @@ def test_checker_tolerates_a_missing_store(tmp_path: Path) -> None:
 
 
 def test_unclean_exit_records_the_corruption_verdict(tmp_path: Path) -> None:
-    _make_state_db(tmp_path, corrupt=True)
+    _make_state_db(tmp_path, corrupt=True, wal=True)
     _write_sentinel(tmp_path)
 
     evidence = record_startup(home=tmp_path)
@@ -99,7 +103,7 @@ def test_unclean_exit_records_the_corruption_verdict(tmp_path: Path) -> None:
 
 
 def test_unclean_exit_on_a_healthy_store_records_ok(tmp_path: Path) -> None:
-    _make_state_db(tmp_path, corrupt=False)
+    _make_state_db(tmp_path, corrupt=False, wal=True)
     _write_sentinel(tmp_path)
 
     evidence = record_startup(home=tmp_path)
@@ -154,7 +158,7 @@ def test_unclean_exit_check_renews_the_startup_lease_while_sqlite_progresses(
     # Renew on every handler tick so the renewal count is deterministic, not clock-bound.
     monkeypatch.setattr(ledger, "_INTEGRITY_CHECK_LEASE_RENEW_S", 0.0)
     monkeypatch.setattr(ledger, "_INTEGRITY_CHECK_PROGRESS_OPS", 1_000)
-    _make_state_db(tmp_path, corrupt=False)
+    _make_state_db(tmp_path, corrupt=False, wal=True)
     _write_sentinel(tmp_path)
 
     evidence = record_startup(home=tmp_path)
