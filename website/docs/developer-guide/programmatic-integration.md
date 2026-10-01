@@ -136,6 +136,7 @@ POST /v1/runs                    Start a run, returns run_id (202)
 GET  /v1/runs/{id}               Run status
 GET  /v1/runs/{id}/events        SSE stream of lifecycle events
 POST /v1/runs/{id}/approval      Resolve a pending approval
+POST /v1/runs/{id}/clarify       Answer a pending clarify question
 POST /v1/runs/{id}/steer         Inject mid-run guidance at the next tool boundary
 POST /v1/runs/{id}/stop          Interrupt the run
 GET  /v1/capabilities            Machine-readable feature flags
@@ -164,6 +165,34 @@ lifecycle receipts, merged by child identity. These recover missed
 Free text is redacted and bounded; file paths, output tails and provider costs
 are excluded (file counts remain available). Receipts follow the run's existing
 retention and access controls; this is not a permanent subagent transcript.
+
+Servers advertising `run_clarify` accept a boolean `clarify` in `POST /v1/runs`
+(default `false`). Only a run that opts in is offered the native `clarify` tool
+(unless `agent.disabled_toolsets` lists `clarify`); other runs keep their
+toolset, so automation that drives Runs never waits on a question nobody sees.
+When the agent asks, the stream emits `clarify.request`:
+
+```json
+{"event": "clarify.request", "run_id": "run_…", "clarify_id": "clr_…",
+ "questions": [{"id": "q0", "prompt": "Which environment?", "choices": ["staging", "production"],
+                "recommended": 0, "multi_select": false, "allow_other": true}],
+ "timeout_seconds": 3600, "expires_at": 1790003600.0}
+```
+
+`choices` is `null` for an open question, `recommended` the index the agent
+prefers, and `allow_other` means free text is accepted beside the choices. The
+run status becomes `waiting_for_clarification` and carries the same payload in
+`clarification` while the question is pending, so a client that missed the SSE
+event recovers it from `GET /v1/runs/{id}`. Answer with
+`POST /v1/runs/{id}/clarify` `{"clarify_id": "clr_…", "responses": [...]}`: one
+entry per question in order — a string (a choice label or free text), a list of
+strings for a multi-select question, or `null` to skip. An identical repeat is
+answered `200` with `replayed: true`; `409` reports `clarify_not_pending`,
+`clarify_already_answered` or `clarify_expired`. The stream then emits
+`clarify.responded` with `outcome` `answered`, `expired` (the native
+`agent.clarify_timeout`) or `cancelled` (`/stop` or an interrupt); answers never
+ride the stream. Without an answer the tool returns its native no-answer result.
+Steering stays reserved for `running` turns, as during an approval.
 
 Browser extensions can opt into the disabled-by-default controller protocol to
 drive the exact browser session that opened the Hermes conversation. The API
@@ -196,7 +225,7 @@ Use `/v1/models` for OpenAI-client compatibility. Use `/api/model/options` or
 
 `POST /v1/runs/{id}/steer` is the HTTP equivalent of Hermes `/steer`: it does not create a new user turn or immediately rewrite the assistant output already in flight. Instead, the text is appended to the live run and becomes visible to the agent after the next tool boundary, so it can course-correct without discarding the current tool-calling loop.
 
-`/v1/runs/{id}/steer` is only accepted while the run status is `running`. Queued, approval-paused, stopping, cancelled, failed, and completed runs return `409 run_not_accepting_steer`, even if the server still retains internal agent references during cooperative shutdown.
+`/v1/runs/{id}/steer` is only accepted while the run status is `running`. Queued, approval-paused, clarification-paused, stopping, cancelled, failed, and completed runs return `409 run_not_accepting_steer`, even if the server still retains internal agent references during cooperative shutdown.
 
 A `200` (and the `run.steered` event) means the text was **queued**, not that the agent consumed it. If a steer lands after the agent's final response — with no later tool boundary to deliver it at — the undelivered text is returned as `pending_steer` on the terminal event (`run.completed`, `run.failed`, or `run.cancelled`) and run status, so the client can replay it as the next user turn instead of losing it.
 

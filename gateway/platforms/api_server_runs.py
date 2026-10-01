@@ -24,6 +24,7 @@ except ImportError:
     RequestKey = None  # type: ignore[assignment,misc]
 
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
+from gateway.platforms.api_server_run_clarify import cancel_run_clarify, handle_run_clarify, make_run_clarify_callback
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 
 
@@ -181,6 +182,7 @@ def _initialize_run_state(self, *, store_factory) -> None:
     self._stopping_run_ids: set[str] = set()
     self._shutdown_interrupted_run_ids: set[str] = set()
     self._run_shutdown_requested_at: Optional[float] = None
+    self._run_clarifications: Dict[str, Any] = {}  # run_id -> latest PendingClarify, kept with the status
     (
         self._run_owners, self._run_streams, self._run_streams_created, self._active_run_agents,
         self._active_run_tasks, self._run_statuses, self._run_approval_sessions,
@@ -197,6 +199,7 @@ def _http_routes(self) -> list[tuple[str, str, Any]]:
         ("POST", "/v1/runs", self._handle_runs), ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
+        ("POST", "/v1/runs/{run_id}/clarify", self._handle_run_clarify),
         ("POST", "/v1/runs/{run_id}/steer", self._handle_steer_run),
         ("POST", "/v1/runs/{run_id}/stop", self._handle_stop_run)]
 
@@ -230,12 +233,15 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> Dict[str, 
         current.setdefault("shutdown_requested_at", shutdown_requested_at)
     if status != "waiting_for_approval":
         current.pop("approval", None)
+    if status in TERMINAL_STATUSES:
+        current.pop("clarification", None)
     self._run_statuses[run_id] = current
     should_persist = (
         status != previous_status
         or status in TERMINAL_STATUSES
         or bool(field_names & {
-            "output", "error", "usage", "pending_steer", "session_id", "shutdown_requested_at", "subagents"}))
+            "output", "error", "usage", "pending_steer", "session_id", "shutdown_requested_at", "subagents",
+            "clarification"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
@@ -430,6 +436,7 @@ def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, 
         status.update(
             status="interrupted", error="The gateway restarted before this run settled.",
             last_event="run.interrupted", updated_at=time.time())
+        status.pop("clarification", None)
         self._run_idempotency_store.update_status(run_id, status)
     self._run_statuses[run_id] = status
     self._run_idempotency_ids.add(run_id)
@@ -701,6 +708,11 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         return web.json_response(_openai_error("'background_delegations' must be a boolean"), status=400)
     if queue_mode and self._room_grant_token(request):
         return web.json_response(_openai_error("Queue requires a profile API credential"), status=403)
+    clarify_mode = body.get("clarify", False)
+    if not isinstance(clarify_mode, bool):
+        return web.json_response(_openai_error("'clarify' must be a boolean"), status=400)
+    if clarify_mode and self._room_grant_token(request):
+        return web.json_response(_openai_error("Clarify requires a profile API credential"), status=403)
     if queue_mode and not self._run_idempotency_store.durable:
         return web.json_response(_openai_error("Queue storage unavailable"), status=503)
     if queue_mode and (
@@ -804,7 +816,9 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         agent_kwargs=dict(
             ephemeral_system_prompt=instructions, session_id=session_id, gateway_session_key=gateway_session_key,
             route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,
-            **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
+            **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")},
+            # Only clients that answer clarify.request get the tool (run_clarify).
+            **({"interactive_clarify": True} if clarify_mode else {})),
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
@@ -1084,6 +1098,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if run.queue_mode:
             self._run_idempotency_store.discard_queue_input(run_id)
         approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
+        if run.agent_kwargs.get("interactive_clarify"):
+            agent.clarify_callback = make_run_clarify_callback(
+                self, run, loop, redact=_api_server.redact_sensitive_text)
         result, usage, served_runtime = await _submit_api_worker(
             loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
         if not isinstance(result, dict):
@@ -1121,6 +1138,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         # On cancellation (/stop) the executor thread may still block on an approval
         # Event; unregistering releases it. Idempotent on normal completion.
         _unregister_approval_notify(run.approval_session_key)
+        cancel_run_clarify(self, run_id)
         with suppress(Exception):
             run.put_event(None)  # sentinel: close the SSE stream
         _retire_live_run(self, run_id)
@@ -1230,7 +1248,8 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
 
 def _mark_run_event(self, run_id: str, name: str, **fields: Any) -> None:
     """Record a control-plane event on the run status and (best effort) its SSE stream."""
-    self._set_run_status(run_id, "running", last_event=name)
+    waiting = "clarification" in self._run_statuses.get(run_id, {})
+    self._set_run_status(run_id, "waiting_for_clarification" if waiting else "running", last_event=name)
     q = self._run_streams.get(run_id)
     if q is not None:
         with suppress(Exception):
@@ -1291,6 +1310,11 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
         "resolved": resolved})
 
 
+async def _handle_run_clarify(self, request: "web.Request", *, _api_server) -> "web.Response":
+    """POST /v1/runs/{run_id}/clarify — answer a pending clarify request (run_clarify)."""
+    return await handle_run_clarify(self, request, _api_server=_api_server)
+
+
 async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "web.Response":
     """POST /v1/runs/{run_id}/steer — inject guidance into a running agent."""
     _openai_error = _api_server._openai_error
@@ -1340,6 +1364,7 @@ async def _handle_stop_run(self, request: "web.Request", *, _api_server) -> "web
             code="run_not_active", status=409)
     self._set_run_status(run_id, "stopping", last_event="run.stopping")
     self._stopping_run_ids.add(run_id)
+    cancel_run_clarify(self, run_id)
     if agent is not None:
         with suppress(Exception):
             _api_server.request_hard_interrupt(agent, "Stop requested via API")
@@ -1373,7 +1398,8 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
     for run_id, status in list(self._run_statuses.items()):
         if (status.get("status") in {"completed", "failed", "cancelled"}
                 and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL):
-            _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids)
+            # A settled clarify receipt lives as long as the status, for idempotent repeats.
+            _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids, self._run_clarifications)
 
 
 async def _handle_list_runs(self, request, *, _api_server):
@@ -1407,7 +1433,8 @@ async def _handle_list_runs(self, request, *, _api_server):
     for rid, item in records.items():
         status = self._durable_run_status(request, rid)
         if status is not None:
-            if status.get("status") in {"running", "waiting_for_approval", "stopping", "completed"}:
+            if status.get("status") in {
+                    "running", "waiting_for_approval", "waiting_for_clarification", "stopping", "completed"}:
                 item = {"run_id": rid}
             result.append({**status, **item})
     for item in result:
