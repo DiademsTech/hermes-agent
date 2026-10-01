@@ -112,6 +112,21 @@ async def test_session_index_does_not_hydrate_prompts(adapter, session_db):
 
 
 @pytest.mark.asyncio
+async def test_compact_session_index_projects_tip_prompt_presence(adapter, session_db):
+    session_db.create_session("root-without-prompt", "api_server")
+    session_db.end_session("root-without-prompt", "compression")
+    session_db.create_session("tip-with-prompt", "api_server",
+                              parent_session_id="root-without-prompt", system_prompt="tip prompt")
+    async with TestClient(TestServer(_create_session_app(adapter))) as cli:
+        response = await cli.get("/api/sessions")
+        assert response.status == 200
+        rows = (await response.json())["data"]
+    assert len(rows) == 1
+    assert rows[0]["id"] == "tip-with-prompt"
+    assert rows[0]["has_system_prompt"] is True
+
+
+@pytest.mark.asyncio
 async def test_session_messages_default_to_latest_bounded_page(adapter, session_db):
     session_id = session_db.create_session("bounded-messages", "api_server")
     session_db.replace_messages(
