@@ -103,6 +103,19 @@ jobs:
               tests/gateway/test_api_server_multiplex_secret_scope.py \
               -q
           fi
+          if [ -f tests/gateway/test_api_server_run_clarify.py ]; then
+            scripts/run_tests.sh \
+              tests/gateway/test_api_server_run_clarify.py \
+              tests/tools/test_clarify_tool.py \
+              -q
+          fi
+          if [ -f tests/gateway/test_lifecycle_unclean_check_journal_mode.py ]; then
+            scripts/run_tests.sh \
+              tests/gateway/test_lifecycle_unclean_check_journal_mode.py \
+              tests/gateway/test_lifecycle_state_db_check.py \
+              tests/gateway/test_lifecycle_ledger.py \
+              -q
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
