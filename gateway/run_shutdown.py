@@ -277,6 +277,8 @@ class GatewayShutdownMixin:
             if not done_future.cancelled():
                 with suppress(Exception):
                     done_future.exception()
+            # The worker outlived its turn, so no turn boundary persists its end (#122813).
+            self._persist_active_agents()
 
         future.add_done_callback(_discard_worker)
 

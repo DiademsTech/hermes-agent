@@ -980,6 +980,7 @@ def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
     if reservation["active"]:
         reservation["active"] = False
         adapter._pending_agent_requests = max(0, adapter._pending_agent_requests - 1)
+        adapter._persist_active_work()
 
 
 def _require_auth(handler):
@@ -1254,6 +1255,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     + sum(not task.done() for task in self._active_run_tasks.values()))
         except Exception:
             return 0
+
+    def _persist_active_work(self) -> None:
+        """Republish the gateway's ``active_agents`` once this adapter's work has dropped: API
+        work ends off the messaging turn boundaries that otherwise persist it (#122813)."""
+        persist = getattr(self.gateway_runner, "_persist_active_agents", None)
+        if callable(persist):
+            with suppress(Exception):
+                persist()
 
     def interrupt_active_runs(self, reason: str) -> int:
         """Interrupt every adapter-owned agent during shutdown (they are not in
@@ -2308,7 +2317,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             read_runtime_status)
         runtime = read_runtime_status() or {}
         gw_state = runtime.get("gateway_state")
+        # Served in-process: report the runner's live total. The persisted count is only rewritten
+        # at work boundaries and outlived work that ended without one (#122813); it remains the
+        # answer when no runner is reachable.
         gw_active = parse_active_agents(runtime.get("active_agents", 0))
+        runner = self.gateway_runner
+        if runner is None:
+            from gateway.run import _gateway_runner_ref
+            runner = _gateway_runner_ref()
+        if runner is not None:
+            with suppress(Exception):
+                gw_active = parse_active_agents(runner._active_work_count())
         # Served BY the gateway process, so gateway_running is True by definition; busy/
         # drainable use the same shared contract as /api/status so the two never disagree.
         active_api_runs, process_depth, active_delegations = self._readiness_work_counts()
@@ -4151,6 +4170,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return await _api_runs._submit_api_worker(loop, _run)
         finally:
             self._inflight_agent_runs -= 1
+            self._persist_active_work()
 
     # -- /v1/runs, room grants, room dispatch: thin delegators (real methods: tests assert
     # __dict__ membership and patch the module-level implementations) ---------------------

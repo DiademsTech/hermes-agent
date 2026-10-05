@@ -3326,6 +3326,20 @@ def _write_runtime_status_quiet(**fields: Any) -> None:
         pass
 
 
+def _republish_active_agents() -> None:
+    """Persist the live runner's ``active_agents`` from any thread. A cron job ends on a scheduler
+    thread, outside the turn boundaries that persist the count, so the file kept a finished job
+    (#122813). The count is read on the gateway loop, like every other persist."""
+    runner = _gateway_runner_ref()
+    if runner is None:
+        return
+    loop = getattr(runner, "_gateway_loop", None)
+    if loop is None or loop.is_closed():
+        return
+    with suppress(RuntimeError):  # the loop closed between the check and the call
+        loop.call_soon_threadsafe(runner._persist_active_agents)
+
+
 def _command_origin_for_source(source: Any) -> Optional[dict]:
     """Delivery origin for a shared CLI/gateway command so its job replies to this chat/thread."""
     try:
@@ -5707,6 +5721,9 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     if isinstance(cron_provider, InProcessCronScheduler):
         cron_start_kwargs["can_dispatch"] = lambda: not (
             runner._draining or runner._external_drain_active)
+    # A job ends on a scheduler thread, outside every turn boundary that persists active_agents.
+    from cron.scheduler import register_job_release_callback
+    register_job_release_callback(_republish_active_agents)
     # Supervised: a ticker that dies without a stop request is respawned by housekeeping (#111010).
     from cron.scheduler_thread import SupervisedTickerThread
     cron_thread = SupervisedTickerThread(

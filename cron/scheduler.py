@@ -788,6 +788,29 @@ def try_register_running_job(job_id: str) -> bool:
         return True
 
 
+# Called with no arguments, on the releasing thread, after a run leaves this process's in-flight
+# set. A job ends on a scheduler thread, outside the gateway's turn boundaries, so the gateway
+# republishes its persisted ``active_agents`` from here (#122813).
+_job_release_callbacks: tuple = ()
+
+
+def register_job_release_callback(callback: Callable[[], None]) -> None:
+    """Add a release observer (idempotent); its exceptions are logged, never raised to the job."""
+    global _job_release_callbacks
+    with _running_lock:
+        if callback not in _job_release_callbacks:
+            _job_release_callbacks = (*_job_release_callbacks, callback)
+
+
+def _notify_job_released() -> None:
+    """Run the release observers; never under ``_running_lock``, so they may read the running set."""
+    for callback in _job_release_callbacks:
+        try:
+            callback()
+        except Exception:
+            logger.debug("Cron job release callback failed", exc_info=True)
+
+
 def release_running_job(job_id: str, home: Optional[Union[Path, str]] = None) -> None:
     """Remove ``job_id`` from the in-flight running set (idempotent).
 
@@ -803,6 +826,7 @@ def release_running_job(job_id: str, home: Optional[Union[Path, str]] = None) ->
         _running_allowance_s.pop(key, None)
         _running_futures.pop(key, None)
         _running_worker_pids.pop(key, None)
+    _notify_job_released()
 
 
 def _inflight_min_allowance_minutes() -> float:
@@ -1046,6 +1070,8 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
             _forced_release_count += 1
             stale.append((job_id, age, allowance, fut, reason))
 
+    if stale:
+        _notify_job_released()
     for job_id, age, allowance, fut, _reason in stale:
         _record_stale_release(by_id.get(job_id) or {}, job_id, age, allowance, fut, _reason)
     return [s[0] for s in stale]
@@ -2775,6 +2801,7 @@ def run_one_job(
                 executions.pop(execution_token, None)
                 if not executions:
                     _running_fire_owners.pop(_fire_key, None)
+        _notify_job_released()
 
 
 _OWNERSHIP_LOST_INTERRUPTED = "Interrupted by shutdown before terminal completion."
