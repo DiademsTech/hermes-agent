@@ -3277,6 +3277,20 @@ def _write_runtime_status_quiet(**fields: Any) -> None:
         pass
 
 
+def _republish_active_agents() -> None:
+    """Persist the live runner's ``active_agents`` from any thread. A cron job ends on a scheduler
+    thread, outside the turn boundaries that persist the count, so the file kept a finished job
+    (#122813). The count is read on the gateway loop, like every other persist."""
+    runner = _gateway_runner_ref()
+    if runner is None:
+        return
+    loop = getattr(runner, "_gateway_loop", None)
+    if loop is None or loop.is_closed():
+        return
+    with suppress(RuntimeError):  # the loop closed between the check and the call
+        loop.call_soon_threadsafe(runner._persist_active_agents)
+
+
 def _command_origin_for_source(source: Any) -> Optional[dict]:
     """Delivery origin for a shared CLI/gateway command so its job replies to this chat/thread."""
     try:
