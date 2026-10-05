@@ -100,6 +100,10 @@ async def _start_cron_job(_gw):
 
     async def finish():
         await asyncio.to_thread(sched.release_running_job, "job-1")
+        # The release schedules the rewrite on the gateway loop before it returns. A worker that
+        # finishes before ``to_thread`` chains its future completes the await without yielding,
+        # so give the loop one turn to run what the release already scheduled.
+        await asyncio.sleep(0)
 
     return finish
 
