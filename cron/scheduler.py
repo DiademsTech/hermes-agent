@@ -546,6 +546,7 @@ from cron.executions import (
     _TERMINAL_STATES, HANDOFF_ADOPTION_GRACE_SECONDS, create_execution, finish_execution,
     get_execution, mark_execution_handoff_pending, mark_execution_running,
     recover_interrupted_executions, terminalize_dead_owner)
+from cron.scheduler_release_observers import notify_job_released
 
 # Response marker that suppresses delivery (output is still saved locally for audit).
 SILENT_MARKER = "[SILENT]"
@@ -697,12 +698,8 @@ class _CombinedCancelEvent:
 
 def get_running_job_ids() -> "frozenset[str]":
     """Thread-safe snapshot of executing job IDs (dispatch until ``_process_job`` returns). Read by
-    the gateway shutdown drain, otherwise blind to cron work (runs outside ``_running_agents``).
-
-    _drain_active_agents``) reads this to treat in-flight cron work as active the same way it already treats
-    in-flight chat sessions via ``_running_agents`` — cron jobs run through their own thread pool here,
-    entirely outside that dict, so without this the drain is structurally blind to them (#60432).
-    """
+    the gateway shutdown drain, otherwise blind to cron work (runs outside ``_running_agents``,
+    #60432)."""
     with _running_lock:
         return frozenset(key[1] for key in _running_job_ids | _running_fire_owners.keys())
 
@@ -879,6 +876,7 @@ def release_running_job(
         _running_futures.pop(key, None)
         _running_worker_pids.pop(key, None)
         _scope_isolated_job_ids.discard(key)
+    notify_job_released()
 
 
 def _inflight_min_allowance_minutes() -> float:
@@ -1129,6 +1127,8 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
             _forced_release_count += 1
             stale.append((job_id, age, allowance, fut, reason))
 
+    if stale:
+        notify_job_released()
     for job_id, age, allowance, fut, _reason in stale:
         _record_stale_release(by_id.get(job_id) or {}, job_id, age, allowance, fut, _reason)
     return [s[0] for s in stale]
@@ -2908,6 +2908,7 @@ def run_one_job(
                 executions.pop(execution_token, None)
                 if not executions:
                     _running_fire_owners.pop(_fire_key, None)
+        notify_job_released()
 
 
 _OWNERSHIP_LOST_INTERRUPTED = "Interrupted by shutdown before terminal completion."
@@ -4322,11 +4323,6 @@ def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor, p
     def _not_dispatched_shutdown() -> None:
         logger.warning("Job '%s' not dispatched — interpreter is shutting down", job_label)
 
-    # During interpreter shutdown pool.submit raises; skip — the job fires on the next tick.
-    # If the interpreter is finalizing (gateway SIGTERM / restart / OOM), scheduling any new delivery is
-    # futile — asyncio.run and a fresh ThreadPoolExecutor both raise "cannot schedule new futures after
-    # interpreter shutdown". Skip gracefully with a warning rather than emitting an ERROR traceback on every
-    # restart-race (#58720, #55924).
     # A tick can race gateway teardown: once the interpreter is finalizing, ``pool.submit`` raises "cannot
     # schedule new futures after interpreter shutdown" and crashes the tick. Skip cleanly — the job stays
     # due and will fire on the next healthy tick (#58720, #55924).

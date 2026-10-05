@@ -138,6 +138,7 @@ from gateway.display_config import resolve_display_setting
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
+from gateway.platforms.api_server_active_work import live_active_agents, persist_active_work
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.base import (
@@ -984,6 +985,7 @@ def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
     if reservation["active"]:
         reservation["active"] = False
         adapter._pending_agent_requests = max(0, adapter._pending_agent_requests - 1)
+        persist_active_work(adapter)
 
 
 def _require_auth(handler):
@@ -2457,11 +2459,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
         """GET /health/detailed — gateway state, platforms, PID for dashboard probing (Bearer auth)."""
         from gateway.status import (
-            derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents,
-            read_runtime_status)
+            derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, read_runtime_status)
         runtime = read_runtime_status() or {}
         gw_state = runtime.get("gateway_state")
-        gw_active = parse_active_agents(runtime.get("active_agents", 0))
+        gw_active = live_active_agents(self, runtime.get("active_agents", 0))
 # Serve the live adapter's own metrics alongside the persisted platform map: the
         # heartbeat loop keeps the file fresh, but a just-booted or wedged writer would
         # otherwise show boot-time values here too (#52323).
@@ -4354,8 +4355,6 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         _clear_turn_process_ownership(agent)
                         self._shutdown_interruptible_agents.pop(id(agent), None)
                         self._memory_sessions.checkin(agent)
-                        # Bind the declared key to the row the turn actually ended on
-                        # (agent.session_id carries a mid-turn rotation). Opt-in per route.
                         # Record the declared conversation on the row the turn actually ended on —
                         # ``agent.session_id`` already carries a mid-turn compression rotation (#16938), so
                         # the next reply resolves the live transcript rather than its retired parent.
@@ -4376,6 +4375,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return result, usage
         finally:
             self._inflight_agent_runs -= 1
+            persist_active_work(self)
             if usage is not None:
                 self._record_api_metrics(usage, time.perf_counter() - started_at)
 

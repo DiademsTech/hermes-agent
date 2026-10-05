@@ -5732,6 +5732,8 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     if isinstance(cron_provider, InProcessCronScheduler):
         cron_start_kwargs["can_dispatch"] = lambda: not (
             runner._draining or runner._external_drain_active)
+    from gateway.run_active_work import watch_cron_releases
+    watch_cron_releases()
     # Supervised: a ticker that dies without a stop request is respawned by housekeeping (#111010).
     from cron.scheduler_thread import SupervisedTickerThread
     cron_thread = SupervisedTickerThread(
@@ -5786,13 +5788,11 @@ async def _start_gateway_shutdown_tail(
 
     _best_effort(_stop_keepalive)
 
-    # Never join(): an in-flight cron delivery is a coroutine on THIS loop; a sync join would drop it.
-    # Stop cron scheduler + housekeeping cleanly. These MUST be awaited cooperatively, not join()ed. A cron
-    # delivery in flight when the gateway restarts is a coroutine scheduled onto THIS event loop
-    # (safe_schedule_threadsafe); the ticker thread is blocked on its future.result(). A synchronous
-    # cron_thread.join() would block the loop, so that delivery could never run — it timed out and the
-    # message was silently dropped (#58818). Awaiting keeps the loop alive so the in-flight delivery
-    # finishes before we tear down.
+    # Stop cron scheduler + housekeeping cooperatively, never join(): a cron delivery in flight when
+    # the gateway restarts is a coroutine scheduled onto THIS loop (safe_schedule_threadsafe) while the
+    # ticker thread blocks on its future.result(). A synchronous cron_thread.join() would block the loop,
+    # so that delivery could never run — it timed out and the message was silently dropped (#58818).
+    # Awaiting keeps the loop alive so the in-flight delivery finishes before we tear down.
     cron_stop.set()
     _stop_cron_provider(cron_provider)
     if not await _await_thread_exit(cron_thread, timeout=_CRON_SHUTDOWN_DRAIN_TIMEOUT):

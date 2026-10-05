@@ -24,6 +24,7 @@ except ImportError:
     # would reset the already-imported ``web`` to None (500 on POST /v1/runs).
     RequestKey = None  # type: ignore[assignment,misc]
 
+from gateway.platforms.api_server_active_work import persist_active_work
 from gateway.platforms.api_server_room_grants import _json_error, _room_grant_error_response
 from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 
@@ -753,6 +754,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         self._background_tasks.add(task)  # tracked for shutdown drain
     if hasattr(task, "add_done_callback"):
         task.add_done_callback(self._background_tasks.discard)
+        # No turn boundary marks a run's end, so the run republishes the count it leaves (#122813).
+        task.add_done_callback(lambda _task: persist_active_work(self))
     return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
 
 
