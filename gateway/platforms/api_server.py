@@ -138,6 +138,7 @@ from gateway.display_config import resolve_display_setting
 from gateway.platforms import api_server_room_dispatch as _room_dispatch
 from gateway.platforms import api_server_room_grants as _room_grants
 from gateway.platforms import api_server_runs as _api_runs
+from gateway.platforms.api_server_active_work import live_active_agents
 from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.base import (
@@ -2457,11 +2458,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
         """GET /health/detailed — gateway state, platforms, PID for dashboard probing (Bearer auth)."""
         from gateway.status import (
-            derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents,
-            read_runtime_status)
+            derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, read_runtime_status)
         runtime = read_runtime_status() or {}
         gw_state = runtime.get("gateway_state")
-        gw_active = parse_active_agents(runtime.get("active_agents", 0))
+        gw_active = live_active_agents(self, runtime.get("active_agents", 0))
 # Serve the live adapter's own metrics alongside the persisted platform map: the
         # heartbeat loop keeps the file fresh, but a just-booted or wedged writer would
         # otherwise show boot-time values here too (#52323).
