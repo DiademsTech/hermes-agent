@@ -287,6 +287,12 @@ RUN python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3
     --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
     --extra azure-identity --extra matrix --extra google-chat --extra firecrawl \
     && /opt/hermes/.venv/bin/python -c "from firecrawl import FirecrawlApp"
+# Diadems mounts Hindsight's optional dependencies read-only at /opt/data/lazy-packages,
+# a venv of this interpreter. Up to v0.21 Hermes appended that durable target to
+# sys.path itself; the lazy-install path is retired, so this .pth appends it instead.
+# .pth entries land after the venv's site-packages, so Hermes' own packages still win
+# a collision, and site ignores the paths when no volume is mounted.
+RUN /opt/hermes/.venv/bin/python -c 'import pathlib, sys, sysconfig; minor = f"{sys.version_info[0]}.{sys.version_info[1]}"; pathlib.Path(sysconfig.get_paths()["purelib"], "zz_diadems_optional_deps.pth").write_text(f"/opt/data/lazy-packages\n/opt/data/lazy-packages/lib/python{minor}/site-packages\n")'
 
 # Icons render on the runtime environment: Pillow and resvg-py are core
 # dependencies. A stage of its own so the frontend stage keeps building its
