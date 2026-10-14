@@ -53,7 +53,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # The pm-pinned full Chromium lives in the managed tool store at
-# /opt/hermes/tools — outside the /opt/data volume mount, so the
+# /opt/hermes/tools â€” outside the /opt/data volume mount, so the
 # build-time install survives the volume overlay at runtime. pm's
 # chromium package fact exports the same value (PLAYWRIGHT_BROWSERS_PATH
 # at the store root); the image ENV names the same directory so
@@ -89,7 +89,7 @@ RUN apt-get -o Acquire::Retries=3 update && \
 # at boot. docker.yml builds both variants and publishes these packages under
 # the `-desktop` tags: hosted sandboxes pull a prebuilt image and never run a
 # build, and cannot apt at run time either (unprivileged, no sudo). Only this
-# build step needs root —
+# build step needs root â€”
 # Xvnc is a userspace X server, so the runtime user can drive it.
 #   docker build --build-arg HERMES_BOT_DESKTOP=1 .
 ARG HERMES_BOT_DESKTOP=0
@@ -120,7 +120,7 @@ db.close()"
 
 # ---------- s6-overlay install ----------
 # s6-overlay provides supervision for the main hermes process, the dashboard,
-# and per-profile gateways. /init becomes PID 1 below — see ENTRYPOINT.
+# and per-profile gateways. /init becomes PID 1 below â€” see ENTRYPOINT.
 #
 # Multi-arch: BuildKit auto-populates TARGETARCH (amd64 / arm64). s6-overlay
 # uses tarball names keyed on the kernel arch string (x86_64 / aarch64), so
@@ -128,8 +128,8 @@ db.close()"
 # architecture-independent and reused as-is.
 #
 # We use `curl` instead of `ADD` for ALL three tarballs: `ADD` evaluates its
-# URL at parse time (no ARG / TARGETARCH substitution) and — critically for
-# CI reliability — cannot retry, so a single GitHub-release CDN blip fails
+# URL at parse time (no ARG / TARGETARCH substitution) and â€” critically for
+# CI reliability â€” cannot retry, so a single GitHub-release CDN blip fails
 # the whole 15-45 min build. curl -fsSL --retry 3 self-heals those blips,
 # and every tarball is still checksum-verified below before extraction.
 ARG TARGETARCH
@@ -169,7 +169,7 @@ RUN set -eu; \
 # path exist, but forwarded tini flags like `-g` into s6-overlay's
 # rc.init as the container CMD (`rc.init: 91: -g: not found`) and
 # boot-looped any `restart: unless-stopped` deploy. The shim strips the
-# tini CLI surface, then exec's /init + main-wrapper — see
+# tini CLI surface, then exec's /init + main-wrapper â€” see
 # docker/tini-shim.sh. Safe to drop once the affected catalogs are
 # updated.
 COPY --chmod=0755 docker/tini-shim.sh /usr/bin/tini
@@ -181,13 +181,13 @@ RUN useradd -u 10000 -m -d /opt/data hermes
 WORKDIR /opt/hermes
 
 # ---------- Pinned toolchain from pm/lock.json (single authority) ----------
-# The image used to assemble uv from a second authority — an astral image
+# The image used to assemble uv from a second authority â€” an astral image
 # tag (ghcr.io/astral-sh/uv:0.11.6-python3.13-trixie) that had already
 # drifted to 0.11.6 while pm/lock.json pinned uv 0.12.3. That is exactly
 # the two-authorities failure the pm design exists to end. The image is now
 # a pin consumer: the stdlib-only pm provisioner reads pm/lock.json and
 # stages the pinned uv + full Chromium (sha256-verified at
-# download — the same code path pm.sh/pm.ps1 and the desktop payload use)
+# download â€” the same code path pm.sh/pm.ps1 and the desktop payload use)
 # into the image's own runtime dir, a self-contained store baked under
 # /opt/hermes, outside the /opt/data volume so it survives the overlay.
 # PM alone resolves the pinned uv for dependency preparation; build consumers
@@ -205,7 +205,7 @@ WORKDIR /opt/hermes
 ENV HERMES_RUNTIME_DIR=/opt/hermes/tools
 COPY pm/ pm/
 # pm's lazy imports resolve get_default_hermes_root()/project_venv_dir()
-# from hermes_constants (stdlib-only) at install time — a sealed-stage
+# from hermes_constants (stdlib-only) at install time â€” a sealed-stage
 # `python3 -m pm.cli install` fails with "No module named
 # 'hermes_constants'" without it on the path. Copy the module next to pm.
 COPY hermes_constants.py hermes_constants.py
@@ -244,7 +244,7 @@ FROM runtime_base AS python_deps
 # README.md is referenced by pyproject.toml's `readme =` field, but it's
 # excluded from the build context by .dockerignore's `*.md`.  uv's build
 # frontend stats the readme path during dep resolution, so we `touch` an
-# empty placeholder — the real README is restored by `COPY . .` below.
+# empty placeholder â€” the real README is restored by `COPY . .` below.
 #
 # `pm.build_env --no-install-project --extra all --extra messaging --extra otlp`
 # installs the deps reachable through the composite `[all]` extra
@@ -302,7 +302,8 @@ RUN python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3
     --cache /opt/hermes/uv-cache \
     --out /opt/hermes/.venv --no-install-project --sealed --record-selection \
     --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
-    --extra azure-identity --extra matrix --extra google-chat --extra fal --extra documents
+    --extra azure-identity --extra matrix --extra google-chat --extra fal --extra documents --extra firecrawl \
+    && /opt/hermes/.venv/bin/python -c "from firecrawl import FirecrawlApp"
 
 # Icons render on the runtime environment: Pillow and resvg-py are core
 # dependencies. A stage of its own so the frontend stage keeps building its
@@ -358,7 +359,7 @@ RUN mkdir -p /opt/hermes/node_modules/.bin && \
 # ---------- Photon iMessage sidecar deps (baked, NS-606) ----------
 # The photon plugin's Node sidecar needs its own node_modules
 # (spectrum-ts). The install tree is immutable at runtime, so a lazy
-# `npm ci` on first connect would hit EROFS — bake the deps here instead
+# `npm ci` on first connect would hit EROFS â€” bake the deps here instead
 # (deterministic installs, NS-559). The patch script is copied alongside
 # the manifests because package.json's postinstall runs it, which also
 # means the spectrum-ts patch is applied at build time. Layer-cached:
@@ -389,7 +390,7 @@ RUN mkdir -p /tmp/hermes-runtime && chmod 0700 /tmp/hermes-runtime
 # --link decouples this layer from parents for cache purposes; --chmod bakes
 # the final read-only permissions at copy time so we skip the separate
 # `chmod -R` pass that previously walked ~30k files across the venv +
-# node_modules + source (21s amd64 / 222s arm64 — #49113).  `a+rX,go-w`
+# node_modules + source (21s amd64 / 222s arm64 â€” #49113).  `a+rX,go-w`
 # gives the non-root hermes user read + traverse but no write; root retains
 # write so the build steps below don't need chmod u+w dances.
 COPY --link --chmod=a+rX,go-w . .
@@ -457,7 +458,7 @@ RUN set -eu; \
 COPY docker/s6-rc.d/ /etc/s6-overlay/s6-rc.d/
 
 # stage2-hook handles UID/GID remap, volume chown, config seeding,
-# skills sync — all the work the old entrypoint.sh did before
+# skills sync â€” all the work the old entrypoint.sh did before
 # `exec hermes`. Wired in as cont-init.d/01- so it
 # runs before user services start.
 #
@@ -476,17 +477,17 @@ ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 # Point the TUI launcher at the prebuilt bundle baked at build time (Layer 8:
 # `ui-tui && npm run build`). This makes _make_tui_argv take the prebuilt-bundle
 # fast path (`node --expose-gc /opt/hermes/ui-tui/dist/entry.js`) and skip the
-# _tui_need_npm_install / runtime `npm install` branch entirely — exactly the
+# _tui_need_npm_install / runtime `npm install` branch entirely â€” exactly the
 # nix/packaged-release path the launcher was designed for.
 #
 # Why this is required (not just an optimization): the root package-lock.json
 # describes the WHOLE monorepo workspace set (root + web + ui-tui + apps/*),
-# but the image only installs root/web/ui-tui (apps/* — the desktop app — is
+# but the image only installs root/web/ui-tui (apps/* â€” the desktop app â€” is
 # never `npm install`ed here). So the actualized node_modules permanently
 # disagrees with the canonical lock, _tui_need_npm_install() returns True on
 # every launch, and the runtime `npm install` it triggers (a) can never
 # converge against the partial monorepo and (b) races itself across concurrent
-# embedded-chat (/api/pty) connections → ENOTEMPTY → the chat tab dies with a
+# embedded-chat (/api/pty) connections â†’ ENOTEMPTY â†’ the chat tab dies with a
 # 502 / "[session ended]". Pointing at the prebuilt bundle sidesteps the whole
 # check. (A separate launcher hardening is tracked independently.)
 ENV HERMES_TUI_DIR=/opt/hermes/ui-tui
@@ -499,7 +500,7 @@ ENV HERMES_WRITE_SAFE_ROOT=/opt/data
 
 # Xfce, dbus and the display-allocation lock need one; containers have no logind
 # to create /run/user/<uid>. The default fallback ($HOME/.cache) is the /opt/data
-# volume, which a host-side install may share — two instances would then contend
+# volume, which a host-side install may share â€” two instances would then contend
 # for one lock. Container-scoped instead; seeded 0700 by docker/stage2-hook.sh.
 ENV XDG_RUNTIME_DIR=/tmp/hermes-runtime
 
@@ -556,15 +557,15 @@ VOLUME [ "/opt/data" ]
 # "main program" with stdin/stdout/stderr inherited (this is what makes
 # interactive --tui work). When the main program exits, /init begins stage 3
 # shutdown and the container exits with the program's exit code. Replaces
-# tini — see Phase 2 of docs/plans/2026-05-07-s6-overlay-dynamic-subagent-gateways.md.
+# tini â€” see Phase 2 of docs/plans/2026-05-07-s6-overlay-dynamic-subagent-gateways.md.
 #
 # We use the ENTRYPOINT+CMD split rather than CMD alone so the
 # wrapper is prepended to user-supplied args automatically:
 #
-#   docker run <image>                  → entrypoint-dispatch.sh   (CMD default)
-#   docker run <image> chat -q "hi"     → entrypoint-dispatch.sh chat -q hi
-#   docker run <image> sleep infinity   → entrypoint-dispatch.sh sleep infinity
-#   docker run <image> --tui            → entrypoint-dispatch.sh --tui
+#   docker run <image>                  â†’ entrypoint-dispatch.sh   (CMD default)
+#   docker run <image> chat -q "hi"     â†’ entrypoint-dispatch.sh chat -q hi
+#   docker run <image> sleep infinity   â†’ entrypoint-dispatch.sh sleep infinity
+#   docker run <image> --tui            â†’ entrypoint-dispatch.sh --tui
 #
 # main-wrapper.sh handles arg routing (bare-exec vs. hermes
 # subcommand vs. no-args), drops to the hermes user via s6-setuidgid,
