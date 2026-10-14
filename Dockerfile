@@ -280,10 +280,13 @@ FROM runtime_base AS python_deps
 # Source binding is created after the source copy below.
 COPY pyproject.toml uv.lock ./
 RUN touch ./README.md
+# Diadems' managed web route must work with its optional dependency volume
+# mounted read-only, without a first-request install into that volume.
 RUN python3 -m pm.build_env --source /opt/hermes --python /usr/local/bin/python3 \
     --out /opt/hermes/.venv --no-install-project --sealed --record-selection \
     --extra all --extra messaging --extra otlp --extra anthropic --extra bedrock \
-    --extra azure-identity --extra matrix --extra google-chat
+    --extra azure-identity --extra matrix --extra google-chat --extra firecrawl \
+    && /opt/hermes/.venv/bin/python -c "from firecrawl import FirecrawlApp"
 
 # Icons render on the runtime environment: Pillow and resvg-py are core
 # dependencies. A stage of its own so the frontend stage keeps building its
