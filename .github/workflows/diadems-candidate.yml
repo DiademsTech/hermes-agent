@@ -15,6 +15,10 @@ on:
         description: Candidate image tag (the digest remains authoritative)
         required: true
         default: v2026.8.31-diadems.4
+      base_version:
+        description: SemVer of the approved upstream tag, recorded in the image install stamp (empty for calendar tags)
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -56,12 +60,20 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
         with:
-          version: "0.11.6"
+          version: ${{ inputs.base_version != '' && '0.12.3' || '0.11.6' }}
 
       - name: Run the Hermes gateway contracts
         working-directory: hermes
+        env:
+          BASE_VERSION: ${{ inputs.base_version }}
         run: |
-          uv sync --locked --python 3.13 --extra dev --extra messaging
+          # SemVer releases (v0.22+) run on Python 3.14 with dev as a dependency group;
+          # calendar tags keep their Python 3.13 extras.
+          if [ -n "$BASE_VERSION" ]; then
+            uv sync --locked --python 3.14 --extra all --extra messaging --group dev
+          else
+            uv sync --locked --python 3.13 --extra dev --extra messaging
+          fi
           scripts/run_tests.sh \
             tests/gateway/test_session_api.py \
             tests/gateway/test_api_server_compaction_projection.py \
@@ -126,6 +138,25 @@ jobs:
               tests/cron/test_inflight_stale_guard.py \
               -q
           fi
+
+      - name: Write the image install stamp
+        if: inputs.base_version != ''
+        working-directory: hermes
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          UPSTREAM_COMMIT: ${{ inputs.upstream_commit }}
+          BASE_VERSION: ${{ inputs.base_version }}
+        run: |
+          # SemVer images read their version from install-stamp.json (.git is not in the
+          # build context); without it the API reports "unknown" and Diadems cannot gate
+          # version-dependent contracts. Distance counts the Diadems patchset commits.
+          [[ "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          distance="$(git rev-list --count "$UPSTREAM_COMMIT..HEAD")"
+          uv run --no-sync python scripts/write_install_stamp.py --output install-stamp.json \
+            --distribution docker --update-mechanism external --source ci \
+            --commit "$SOURCE_COMMIT" --base-version "$BASE_VERSION" \
+            --display-version "${BASE_VERSION}+diadems.${distance}" --distance "$distance"
+          python3 -c 'import json; s = json.load(open("install-stamp.json")); print(s["baseVersion"], s["displayVersion"], s["commit"])'
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
