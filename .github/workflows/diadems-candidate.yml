@@ -138,6 +138,13 @@ jobs:
               tests/cron/test_inflight_stale_guard.py \
               -q
           fi
+          if [ -f tests/agent/test_stdio_wrapper_chain.py ]; then
+            scripts/run_tests.sh \
+              tests/agent/test_stdio_wrapper_chain.py \
+              tests/agent/test_thread_scoped_output.py \
+              tests/agent/test_run_agent.py \
+              -q
+          fi
 
       - name: Write the image install stamp
         if: inputs.base_version != ''
