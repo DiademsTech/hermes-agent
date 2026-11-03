@@ -349,6 +349,28 @@ def test_detects_trailing_next_i():
     assert trailing_continue_intent("Step one complete. Next: I run the tests")
 
 
+def test_detects_trailing_french_immediate_intent():
+    assert trailing_continue_intent("J'ai trouvé le fichier. Je vais maintenant le corriger.")
+    assert trailing_continue_intent("Bien reçu. Je m'en occupe.")
+    assert trailing_continue_intent("C'est noté, je m’y mets")
+    assert trailing_continue_intent("Les données sont prêtes. Je lance l'export tout de suite.")
+    assert trailing_continue_intent("Premier lot traité. Ensuite, je fusionne les deux tableaux.")
+    assert trailing_continue_intent("À présent je passe aux factures de mars…")
+    assert trailing_continue_intent("Parfait. Laissez-moi maintenant vérifier les montants.")
+
+
+def test_ignores_deferred_or_conditional_french_intent():
+    assert not trailing_continue_intent("Je m'en occupe demain matin, un rappel est programmé.")
+    assert not trailing_continue_intent("Je m'en occupe dès que vous m'envoyez le fichier.")
+    assert not trailing_continue_intent("Voulez-vous que je m'en occupe maintenant ?")
+    assert not trailing_continue_intent("Je lance la surveillance et je reviens vers vous à la fin.")
+    assert not trailing_continue_intent("Le devis est envoyé et la facture est prête.")
+    assert not trailing_continue_intent(
+        "Je vais maintenant détailler les trois options. D'abord, le prix : 39 € par mois. "
+        "Ensuite, le stockage : 5 Go inclus, extensible par packs."
+    )
+
+
 def test_ignores_intent_followed_by_more_content():
     # Intent phrase mid-message with substantive content after it — the model
     # already continued; nothing dangling.
