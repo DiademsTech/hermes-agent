@@ -3424,6 +3424,24 @@ _TRAILING_CONTINUE_INTENT_RE = re.compile(
     r"[^.!?\n]{0,100}[.:\u2026]?\s*$", re.IGNORECASE,
 )
 
+# French counterpart, same narrow shape: an immediate next action ("je vais maintenant…",
+# "je m'en occupe", "ensuite, je…"), never a deferred one ("je m'en occupe demain", "dès que…").
+_FR_NOW = r"(?:maintenant|tout de suite|immédiatement|de ce pas|dès maintenant)"
+_FR_LATER = (
+    r"(?![^.!?\n]*\b(?:demain|plus tard|dès|quand|lorsque|ce soir|la semaine"
+    r"|lundi|mardi|mercredi|jeudi|vendredi)\b)"
+)
+_TRAILING_CONTINUE_INTENT_FR_RE = re.compile(
+    r"(?:\bje vais " + _FR_NOW + r"\b"
+    r"|(?:\bmaintenant|\bà présent),? je (?:vais|m['’]occupe|lance|passe|commence)\b"
+    r"|\bje m['’](?:en occupe|y mets|y attelle)\b" + _FR_LATER +
+    r"|\bje (?:lance|commence|démarre|passe|vérifie|regarde|prépare|m['’]occupe)\b"
+    r"[^.!?\n]{0,60}\b" + _FR_NOW + r"\b"
+    r"|\b(?:ensuite|étape suivante)\s*[,:]\s*je\b"
+    r"|\blaisse(?:z)?-moi maintenant\b)"
+    r"[^.!?\n]{0,100}[.:…]?\s*$", re.IGNORECASE,
+)
+
 # Content longer than this is a substantive reply, not a dangling ack.
 _TRAILING_CONTINUE_INTENT_MAX_CHARS = 400
 
@@ -3433,7 +3451,10 @@ def trailing_continue_intent(text: str) -> bool:
     t = (text or "").strip()
     if not t or len(t) > _TRAILING_CONTINUE_INTENT_MAX_CHARS:
         return False
-    return bool(_TRAILING_CONTINUE_INTENT_RE.search(t[-160:]))
+    tail = t[-160:]
+    return bool(
+        _TRAILING_CONTINUE_INTENT_RE.search(tail) or _TRAILING_CONTINUE_INTENT_FR_RE.search(tail)
+    )
 
 
 # Broader tail detector for PROMOTED REASONING only (reasoning-only clean stop with tools offered
