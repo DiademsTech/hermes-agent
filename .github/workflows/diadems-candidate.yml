@@ -145,6 +145,14 @@ jobs:
               tests/agent/test_run_agent.py \
               -q
           fi
+          if [ -f tests/gateway/test_session_fork_before_message.py ]; then
+            scripts/run_tests.sh \
+              tests/gateway/test_session_fork_before_message.py \
+              tests/hermes_state/test_composite_carrier_rewind.py \
+              tests/hermes_state/test_rewind_surfaces_invariant.py \
+              tests/hermes_state/test_tail_rewind_semantics.py \
+              -q
+          fi
 
       - name: Write the image install stamp
         if: inputs.base_version != ''
