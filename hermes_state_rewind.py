@@ -167,3 +167,24 @@ class SessionRewindMixin:
             expected_target_content=stored_view.get("content"), scaffold=scaffold, prefix=prefix,
             durable_prefix=durable_prefix, live_view=live_view, live_text=live_text, durable_user=durable_user,
             user_ordinal=user_ordinal)
+
+    def history_before_message(self, session_id: str, message_id: int) -> list[dict[str, Any]]:
+        """The model-fed history as it stood just before user row ``message_id``: the carrier-aware prefix
+        ``/undo`` keeps (a compaction carrier keeps its hidden handoff scaffold), read from the compression
+        segment that holds the row, so a row before a rotation forks with that segment's own context. A
+        pure read: nothing is rewound. :class:`RewindTargetUnavailableError` when the row is not an active
+        user-originated turn of this conversation (compacted away, a tool row, another session)."""
+        from agent.context_compressor import history_before_user_originated_turn
+
+        tip = self.resolve_resume_session_id(session_id) or session_id
+        for segment in reversed(self._resume_lineage_ids(tip)):
+            durable = self.get_messages_as_conversation(segment, include_row_ids=True, repair_alternation=True)
+            index = next((i for i, m in enumerate(durable) if m.get("_row_id") == message_id), None)
+            if index is None:
+                continue
+            try:
+                prefix, _ = history_before_user_originated_turn(durable, index)
+            except ValueError as exc:
+                raise RewindTargetUnavailableError(str(exc)) from exc
+            return prefix
+        raise RewindTargetUnavailableError("message is not an active turn of this conversation")
