@@ -50,7 +50,8 @@ _STATIC_FEATURE_FLAGS = {
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
     "session_resources": True, "model_options": True, "session_chat": True,
-    "session_chat_streaming": True, "session_fork": True, "session_model_lock": True,
+    "session_chat_streaming": True, "session_fork": True, "session_fork_before_message": True,
+    "session_model_lock": True,
     "reasoning_streaming": True,
     "admin_config_rw": False, "jobs_admin": False, "memory_write_api": False,
     "skills_api": True, "audio_api": False, "realtime_voice": False,
@@ -2764,7 +2765,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     @_require_auth
     async def _handle_fork_session(self, request: web.Request) -> web.Response:
-        """POST /api/sessions/{session_id}/fork — branch via current SessionDB primitives."""
+        """POST /api/sessions/{session_id}/fork — branch via current SessionDB primitives.
+
+        ``before_message_id`` (a user row of the conversation) forks the history as it stood just before
+        that turn, the prefix ``/undo`` would keep; ``keep_source`` leaves the original open. A bounded
+        fork never ends its source: the conversation it was cut from goes on unchanged."""
         source_id = request.match_info["session_id"]
         source, err = await self._get_existing_session_or_404(source_id)
         if err:
@@ -2778,6 +2783,21 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response("Invalid session ID", 400, code="invalid_session_id")
         if await asyncio.to_thread(db.get_session, fork_id):
             return _error_response(f"Session already exists: {fork_id}", 409, code="session_exists")
+        before_id = body.get("before_message_id")
+        if before_id is not None and (isinstance(before_id, bool) or not isinstance(before_id, int) or before_id <= 0):
+            return _error_response("before_message_id must be a positive integer", 400, code="invalid_fork_point")
+        keep_source = body.get("keep_source", False)
+        if not isinstance(keep_source, bool):
+            return _error_response("keep_source must be a boolean", 400, code="invalid_fork_point")
+        prefix = None
+        if before_id is not None:
+            from hermes_state_rewind import RewindTargetUnavailableError
+            try:
+                prefix = await asyncio.to_thread(db.history_before_message, source_id, before_id)
+            except RewindTargetUnavailableError as exc:
+                return _error_response(str(exc), 409, code="fork_point_unavailable")
+            if not prefix:
+                return _error_response("nothing precedes this message", 409, code="fork_point_unavailable")
 
         # CLI /branch semantics: create the child, then end the original as branched (child first, so
         # a failed create never leaves the source ended with no fork, #11030).
@@ -2788,9 +2808,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             db.create_session, fork_id, "api_server", model=source.get("model"),
             system_prompt=source.get("system_prompt"), parent_session_id=source_id,
             model_config={"_branched_from": source_id})
-        await asyncio.to_thread(db.end_session, source_id, "branched")
-        messages = await asyncio.to_thread(db.get_messages, source_id)
-        await asyncio.to_thread(db.replace_messages, fork_id, messages)
+        if prefix is not None:
+            # The /branch copy shape: the api_content sidecar keeps the parent's exact wire bytes.
+            from gateway.slash_commands_session import _branch_row
+            await asyncio.to_thread(db.append_messages_batch, fork_id, [_branch_row(m) for m in prefix], chunk_rows=500)
+        else:
+            if not keep_source:
+                await asyncio.to_thread(db.end_session, source_id, "branched")
+            messages = await asyncio.to_thread(db.get_messages, source_id)
+            await asyncio.to_thread(db.replace_messages, fork_id, messages)
         title = body.get("title")
         if title is None:
             base = source.get("title") or "fork"
