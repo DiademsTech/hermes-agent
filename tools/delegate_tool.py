@@ -416,9 +416,12 @@ def _build_children(
     task_list: list[dict[str, Any]], task_schemas: list[Optional[dict[str, Any]]], creds: dict[str, Any], *,
     top_role: str, max_iterations: int, parent_agent, routing_cfg: dict[str, Any],
     live_deleg_id: Optional[str], live_writers: list, task_images: Optional[list[Optional[list[str]]]] = None,
+    task_routes: Optional[list] = None,
 ) -> tuple[list[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe);
-    ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
+    ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure.
+    ``task_routes[i]`` is a task's own model choice (tools/delegate_model_choices)."""
+    from tools.delegate_model_choices import apply_reasoning
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
     overrides = _credential_overrides(creds, routing_cfg)
@@ -428,15 +431,19 @@ def _build_children(
         _child_context = t.get("context")
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
+        _route = task_routes[i] if task_routes and i < len(task_routes) else None
+        _creds, _overrides = (_route[0], _credential_overrides(_route[0], _route[1])) if _route else (creds, overrides)
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
+                model=_creds["model"], max_iterations=max_iterations, task_count=len(task_list),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **_overrides,
             )
         except ValueError as exc:
             return [], str(exc)
+        if _route:
+            apply_reasoning(child, _route[2])
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
                 child._delegate_output_schema = _task_schema
@@ -548,6 +555,11 @@ def delegate_task(
         task_images, err = _coerce_task_images(task_list, images)
     if err:
         return tool_error(err)
+    from tools.delegate_model_choices import task_routes
+
+    routes, err = task_routes(task_list, routing_cfg, parent_agent)
+    if err:
+        return tool_error(err)
     err = _oneshot_spawn_budget(parent_agent, len(task_list))
     if err:
         return tool_error(err)
@@ -578,6 +590,7 @@ def delegate_task(
     children, err = _build_children(
         task_list, task_schemas, creds, top_role=top_role, max_iterations=default_max_iter, parent_agent=parent_agent,
         routing_cfg=routing_cfg, live_deleg_id=live_deleg_id, live_writers=live_writers, task_images=task_images,
+        task_routes=routes,
     )
     if err:
         return tool_error(err)
@@ -647,7 +660,8 @@ _DESCRIPTION_HEAD = (
     "the parent applies the transition.\n"
 )
 _DESCRIPTION_TAIL = (
-    "- Children inherit the parent model unless pinned via delegation.provider / delegation.model in config.yaml."
+    "- Children inherit the parent model unless pinned via delegation.provider / delegation.model in config.yaml, "
+    "or unless a task names one of the listed `model` choices (when the tasks schema offers it)."
 )
 
 def _build_tasks_param_description() -> str:
@@ -673,6 +687,13 @@ def _build_dynamic_schema_overrides() -> dict:
     # Copy properties so the static schema dict is never mutated.
     overrides_params["properties"] = {k: dict(v) for k, v in DELEGATE_TASK_SCHEMA["parameters"]["properties"].items()}
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
+
+    from tools.delegate_model_choices import schema_property
+
+    model_property = schema_property(_load_config())
+    if model_property:
+        tasks = overrides_params["properties"]["tasks"]
+        tasks["items"] = {**tasks["items"], "properties": {**tasks["items"]["properties"], "model": model_property}}
 
     if not independent_completions:
         tasks = overrides_params["properties"]["tasks"]
