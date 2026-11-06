@@ -20,6 +20,11 @@ on:
         required: false
         default: ""
 
+      verify_digest:
+        description: Verify an existing candidate digest instead of building (sha256 only)
+        required: false
+        default: ""
+
 permissions:
   contents: read
   packages: write
@@ -30,6 +35,7 @@ concurrency:
 
 jobs:
   build:
+    if: inputs.verify_digest == ''
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -219,3 +225,36 @@ jobs:
           echo "### Diadems Hermes candidate" >> "$GITHUB_STEP_SUMMARY"
           echo "ghcr.io/diademstech/hermes-agent:${IMAGE_TAG}@${IMAGE_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
           echo "Record this candidate digest in the private Diadems manifest; approve it only after canary validation." >> "$GITHUB_STEP_SUMMARY"
+
+  verify-image:
+    if: inputs.verify_digest != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout the reviewed verification harness
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          sparse-checkout: diadems-ci
+          persist-credentials: false
+      - name: Verify sealed candidate without network or agent data
+        shell: bash
+        env:
+          IMAGE_DIGEST: ${{ inputs.verify_digest }}
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          image="ghcr.io/diademstech/hermes-agent@$IMAGE_DIGEST"
+          docker pull "$image"
+          docker run --rm -i --network none --read-only \
+            --tmpfs /tmp:rw,exec,nosuid,size=512m --tmpfs /opt/data:rw,exec,nosuid,size=512m \
+            --user hermes --workdir /opt/hermes \
+            --env EXPECTED_SOURCE_COMMIT --env PYTHONPATH=/opt/hermes \
+            --entrypoint /opt/hermes/.venv/bin/python "$image" - < diadems-ci/verify-image.py
+          echo "Sealed image imports, health/capabilities, native skills and DELETE concurrency passed." >> "$GITHUB_STEP_SUMMARY"
+          echo "Kata/virtiofs, mounted memory/auth dependencies and canary remain separate gates." >> "$GITHUB_STEP_SUMMARY"
