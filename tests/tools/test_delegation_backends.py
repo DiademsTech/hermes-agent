@@ -165,6 +165,31 @@ def test_an_unroutable_task_is_refused_alone_and_its_siblings_run(tmp_path, monk
         manager.unload()
 
 
+def test_configured_model_choices_use_native_routes_and_refuse_unlisted_models(tmp_path, monkeypatch, recorded):
+    config = {"model": "default-child", "base_url": "http://127.0.0.1:9/v1", "api_key": "default-key",
+              "model_choices": [{"id": "deep", "model": "deep-model", "label": "Deep",
+                                 "when": "Reason carefully", "reasoning_effort": "high"}]}
+    _, manager = _home(tmp_path, monkeypatch, config, plugins=())
+    try:
+        from tools.delegate_tool import delegate_task
+        prop = _task_props(_definition())["model_choice"]
+        assert prop["enum"] == ["deep"] and "Reason carefully" in prop["description"]
+        out = json.loads(delegate_task(tasks=[
+            {"goal": "use the selected route", "model_choice": "deep"},
+            {"goal": "keep the default route"},
+            {"goal": "refuse a model outside the list", "model_choice": "arbitrary"},
+        ], parent_agent=_parent()))
+        assert [r["status"] for r in out["results"]] == ["completed", "completed", "error"]
+        selected, default = recorded
+        assert selected["model"] == "deep-model"
+        assert selected["override_reasoning_effort"] == "high"
+        assert selected["override_api_key"] != "default-key"
+        assert selected["fallback_model"] == []
+        assert default["model"] == "default-child"
+    finally:
+        manager.unload()
+
+
 def test_a_missing_backend_fails_closed_and_default_keeps_todays_route(tmp_path, monkeypatch, recorded):
     """Unset and ``default`` are today's behaviour; a backend nobody provides is a tool error naming it and the fix,
     never a quiet run on the default route."""
