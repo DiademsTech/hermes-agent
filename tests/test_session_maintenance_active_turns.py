@@ -77,3 +77,21 @@ def test_explicit_prune_keeps_its_existing_contract(stores):
     assert writer.try_acquire_session_turn_lease("live", "writer")
     assert maintenance.prune_sessions(older_than_days=90) == 1
     assert writer.refresh_session_turn_lease("live", "writer")
+
+
+def test_claimed_admission_defers_prune_before_turn_lease_exists(stores):
+    from hermes_state_runtime import (
+        admit_session_input, begin_runtime_epoch, claim_session_input, settle_session_input,
+    )
+    maintenance, writer = stores
+    epoch = begin_runtime_epoch(writer, instance_id="maintenance-contract")
+    row = admit_session_input(writer, epoch=epoch, principal_id="test", session_id="live",
+                              request_id="first", payload={"text": "Starting"})
+    claimed = claim_session_input(writer, epoch=epoch, session_id="live")
+    assert claimed["admission_id"] == row["admission_id"]
+    result = maintenance.maybe_auto_prune_and_vacuum(vacuum=False)
+    assert result["deferred"] == "active_turn" and maintenance.get_session("old") is not None
+    assert maintenance.get_meta("last_auto_prune") is None
+    settle_session_input(writer, epoch=epoch, admission_id=row["admission_id"],
+                         generation=claimed["generation"], outcome="completed")
+    assert maintenance.maybe_auto_prune_and_vacuum(vacuum=False)["pruned"] == 1
