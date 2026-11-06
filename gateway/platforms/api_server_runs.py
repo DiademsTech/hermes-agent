@@ -332,7 +332,7 @@ def _set_run_status(self, run_id: str, status: str, **fields: Any) -> dict[str, 
         status != previous_status
         or status in TERMINAL_STATUSES
         or bool(field_names & {
-            "output", "error", "usage", "pending_steer", "session_id", "shutdown_requested_at"}))
+            "output", "error", "usage", "pending_steer", "session_id", "shutdown_requested_at", "subagents"}))
     if run_id in self._run_idempotency_ids and should_persist:
         try:
             self._run_idempotency_store.update_status(run_id, current)
@@ -435,7 +435,30 @@ def _make_run_event_callback(self, run_id: str, loop: asyncio.AbstractEventLoop,
                     # Free text may carry child tool output: force secret redaction on this public stream.
                     redact = key in _SUBAGENT_TEXT_KEYS and isinstance(value, str)
                     event[key] = redact_sensitive_text(value, force=True) if redact else value
-            _push(event)
+            def publish_subagent():
+                current = self._run_statuses.get(run_id)
+                if current is None:
+                    _push(event)
+                    return
+                receipt = {k: v[:12000] if isinstance(v, str) else v for k, v in event.items()
+                           if k not in {"output_tail", "cost_usd", "files_read", "files_written"}}
+                for key in ("files_read", "files_written"):
+                    value = event.get(key)
+                    if isinstance(value, list):
+                        receipt[key] = len(value)
+                    elif type(value) is int and value >= 0:
+                        receipt[key] = value
+                receipts = list(current.get("subagents") or [])
+                identity = receipt.get("subagent_id") or receipt.get("child_session_id")
+                index = next((i for i, item in enumerate(receipts)
+                              if identity and identity == (item.get("subagent_id") or item.get("child_session_id"))), None)
+                if index is None:
+                    receipts.append(receipt)
+                else:
+                    receipts[index] = {**receipts[index], **receipt}
+                self._set_run_status(run_id, current["status"], subagents=receipts[-32:])
+                _push(event)
+            loop.call_soon_threadsafe(publish_subagent)
 
     return _callback
 
@@ -497,7 +520,10 @@ def _durable_run_status(self, request: web.Request, run_id: str) -> dict[str, An
         # The documented poll shape: the canonical projection decides status/output/usage; the
         # retained run record still names the object, the requested model and the served runtime.
         retained = self._run_statuses.get(run_id) or {}
-        return {"object": "hermes.run", **{key: retained[key] for key in ("model", "runtime", "created_at")
+        if not retained:
+            record = self._run_idempotency_store.status_for_run(self._run_idempotency_scope(request), run_id)
+            retained = (record or {}).get("status") or {}
+        return {"object": "hermes.run", **{key: retained[key] for key in ("model", "runtime", "created_at", "subagents")
                                            if key in retained}, **canonical}
     status = self._run_statuses.get(run_id)
     if status is not None:
@@ -777,7 +803,7 @@ async def _admit_run_to_authority(
                 run_owner_scope=self._run_owners[run_id],
                 turn_author=launch.turn_author,
                 history_from_session=session_history_delivery,
-                session_history_delivery='1' if session_history_delivery else '',
+                session_history_delivery='1' if launch.session_history_delivery else '',
                 bind_declared_conversation=_declared_selected, walked_from=launch.walked_from,
                 **launch.agent_kwargs)
     except Exception as exc:  # health: allow BLE001 -- answered below; a committed admission is kept
@@ -812,6 +838,9 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
     body, room_error = await self._normalize_room_dispatch(request, body)
     if room_error is not None:
         return room_error
+    background_delegations = body.get("background_delegations", True)
+    if type(background_delegations) is not bool:
+        return _json_error(_openai_error, "background_delegations must be a boolean", status=400)
     room_dispatch, room_execution_policy = (
         v if isinstance(v, dict) else None for v in (
             (body.get("hosted_room_dispatch"), body.get("_room_execution_policy"))
@@ -901,7 +930,7 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         self._run_idempotency_ids.add(run_id)
     launch = _RunLaunch(
         self, run_id, q, session_id, gateway_session_key, _declared_selected, user_message,
-        conversation_history, session_history_delivery,
+        conversation_history, session_history_delivery and background_delegations,
         agent_kwargs=dict(
             ephemeral_system_prompt=instructions, session_id=session_id, gateway_session_key=gateway_session_key,
             route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,

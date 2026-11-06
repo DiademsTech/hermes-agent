@@ -807,7 +807,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 return a
         return None
 
-    async def _self_post_api_server(self, adapter, synth_text: str, raw_sid: str, evt: dict) -> bool:
+    async def _self_post_api_server(self, adapter, synth_text: str, raw_sid: str, evt: dict,
+                                    *, raise_not_accepted: bool = False) -> bool:
         """Deliver to a non-push (api_server) session by raw session id.
 
         Async-delegation completions are persisted as a durable delivery row — after the parent
@@ -815,6 +816,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         self-post them as a new role=user prompt. Other watch events wake the session via self-post.
         """
         from gateway.wake import deliver_wake, persist_delegation_delivery
+        from hermes_state_errors import SessionTurnLeaseLostError
         scope = contextlib.nullcontext()
         if evt.get("type") == "async_delegation":
             info = "Async delegation completion — persisting delivery row for api_server session %s (no wake turn)"
@@ -842,6 +844,13 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             async with scope:
                 await deliver()
             return True
+        except SessionTurnLeaseLostError as exc:
+            # A healthy active turn is not a failed delivery. Refund its durable
+            # claim so a long turn cannot exhaust the detached result's retry budget.
+            if raise_not_accepted and evt.get("type") == "async_delegation":
+                from gateway.wake import WakeNotAccepted
+                raise WakeNotAccepted("API session still owns its active turn") from exc
+            return False
         except Exception as e:
             logger.warning(fail, raw_sid, e)
             return False
@@ -950,7 +959,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             if raw_sid:
                 adapter = self.adapters.get(Platform.API_SERVER)
                 if adapter is not None and not adapter_supports_push(adapter):
-                    return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
+                    return await self._self_post_api_server(
+                        adapter, synth_text, raw_sid, evt, raise_not_accepted=raise_not_accepted)
                 logger.debug(
                     "Deferring watch notification for raw session %s: no api_server adapter to self-post through",
                     raw_sid,
@@ -973,7 +983,8 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             # Non-push adapter (api_server): its chat_id IS the raw session id, so handle_message would
             # key the wake under a build_session_key() that never matches — self-post instead.
             raw_sid = str(evt.get("origin_session_id") or "").strip() or str(source.chat_id or "")
-            return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
+            return await self._self_post_api_server(
+                adapter, synth_text, raw_sid, evt, raise_not_accepted=raise_not_accepted)
         try:
             synth_text = _mark_internal_notification(synth_text)
             metadata = _watch_notification_metadata(evt, source)

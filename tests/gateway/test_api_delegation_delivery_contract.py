@@ -50,6 +50,8 @@ async def test_detached_dispatch_requires_a_declared_consumer(monkeypatch):
     assert runs["session"]["runtime"]["history"] == result["resumed_history"]
     assert runs["declared_key"]["runtime"]["target"] == "declared"
     assert runs["declared_key"]["runtime"]["history"][0]["content"] == "DECLARED_HISTORY"
+    assert runs["finite"]["runtime"]["target"] is None
+    assert runs["finite"]["runtime"]["history"] == result["resumed_history"]
 
 
 @pytest.mark.asyncio

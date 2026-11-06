@@ -54,6 +54,7 @@ _STATIC_FEATURE_FLAGS = {
     "run_events_message_interim": True,
     "run_queue": True, "run_queue_controls": True, "run_clarify": True,
     "run_controls_generation_bound": True,
+    "run_inline_delegations": True, "run_status_subagents": True,
     "session_messages_include_compacted": True,
     "session_auto_prune_idle_guard": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
