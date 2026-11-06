@@ -53,11 +53,9 @@ def test_scheduler_applies_each_job_policy_without_disabling_recall(tmp_path, po
         patch("cron.scheduler_delivery._resolve_origin", return_value=None),
         patch("hermes_cli.env_loader.load_hermes_dotenv"),
         patch("hermes_cli.env_loader.reset_secret_source_cache"),
-        patch("hermes_state_registry.acquire") as state,
         patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value=runtime),
         patch("run_agent.AIAgent") as agent,
     ):
-        state.return_value.get_compression_tip.side_effect = lambda sid: sid
         agent.return_value.run_conversation.return_value = {"final_response": "ok"}
         success, _, _, error = run_job(job)
     assert success, error
