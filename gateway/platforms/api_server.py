@@ -51,6 +51,7 @@ _STATIC_FEATURE_FLAGS = {
     "run_guardrail_halt_incomplete": True,
     "run_events_memory_recall": True, "run_events_memory_recall_details": True,
     "automation_memory_auto_retain": True,
+    "webhook_execution_model": True, "webhook_result_session": True,
     "run_events_message_interim": True,
     "run_queue": True, "run_queue_controls": True, "run_clarify": True,
     "run_controls_generation_bound": True,

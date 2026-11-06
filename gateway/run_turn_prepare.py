@@ -153,6 +153,16 @@ class GatewayTurnPrepareMixin:
                 ][:5] or "[]",
             )
 
+        from gateway.webhook_execution import source_choice
+        automation = source_choice(source)
+        if not override and automation.get("model"):
+            # Resolve the complete configured route, never borrow another account.
+            runtime = _resolve_runtime_agent_kwargs_for_provider(
+                automation["provider"], target_model=automation["model"])
+            runtime.pop("model", None)
+            self._pre_agent_fallback_notice = runtime.pop("_fallback_notice", None)
+            return automation["model"], runtime
+
         runtime_kwargs, unavailable_override = None, None
         if override and override.get("provider"):
             try:
