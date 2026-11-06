@@ -40,7 +40,7 @@ def test_session_source_preserves_retention_without_changing_chat_default():
 
 
 @pytest.mark.parametrize("policy", [None, False, True])
-def test_scheduler_applies_each_job_policy_without_disabling_recall(tmp_path, policy):
+def test_scheduler_applies_each_job_policy_without_disabling_recall(tmp_path, policy, cron_owner):
     from cron.scheduler import run_job
 
     job = {"id": "memory-policy", "name": "test", "prompt": "hello"}
