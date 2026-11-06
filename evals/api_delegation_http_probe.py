@@ -83,6 +83,7 @@ async def probe():
             ("caller_history", {"session_id": "parent", "conversation_history": snapshot}, {}),
             ("response_chain", {"previous_response_id": "resp-seed"}, {}),
             ("declared_key", {}, {"X-Hermes-Session-Key": "fixture-key"}),
+            ("finite", {"session_id": "child", "background_delegations": False}, {}),
         ):
             count = len(captured)
             response = await client.post("/v1/runs", headers={"Authorization": "Bearer fixture-api-key", **extra_headers}, json={"input": "continue", **body})

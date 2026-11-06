@@ -150,6 +150,9 @@ async def test_run_receives_memory_and_interim_only_for_its_live_generation(api,
         agent.tool_progress_callback('memory.recall', phase='started')
         agent.tool_progress_callback('memory.recall', phase='completed', returned=True,
                                      count=1, memories=('Known preference',))
+        agent.tool_progress_callback('subagent.start', subagent_id='child', task='Inspect files')
+        agent.tool_progress_callback('subagent.complete', subagent_id='child', status='completed',
+                                     files_read=['private/path'], output_tail='private child output')
         agent.interim_assistant_callback('I am checking the files.', already_streamed=False)
         execution_result.get()['result'] = {'final_response': 'done'}
         return 'done'
@@ -162,6 +165,10 @@ async def test_run_receives_memory_and_interim_only_for_its_live_generation(api,
     assert [e['phase'] for e in recall] == ['started', 'completed']
     assert recall[1]['memories'] == ['Known preference']
     assert [e['text'] for e in events if e['event'] == 'message.interim'] == ['I am checking the files.']
+    receipts = api._run_statuses['run_test']['subagents']
+    assert len(receipts) == 1 and receipts[0]['status'] == 'completed'
+    assert receipts[0]['files_read'] == 1
+    assert 'private/path' not in str(receipts) and 'private child output' not in str(receipts)
     wired[0].tool_progress_callback('memory.recall', phase='started')
     wired[0].interim_assistant_callback('late callback')
     await asyncio.sleep(0)
