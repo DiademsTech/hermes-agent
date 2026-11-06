@@ -69,7 +69,15 @@ jobs:
         run: |
           # SemVer releases (v0.22+) run on Python 3.14 with dev as a dependency group;
           # calendar tags keep their Python 3.13 extras.
-          if [ -n "$BASE_VERSION" ]; then
+          if [ "$BASE_VERSION" = "0.23.0" ]; then
+            uv python install 3.14
+            bootstrap_python="$(uv python find 3.14)"
+            "$bootstrap_python" -m pm.build_env --source . --out .venv \
+              --python "$bootstrap_python" --extra messaging --group dev --group test
+            export HERMES_PYTHON="$PWD/.venv/bin/python"
+            "$HERMES_PYTHON" scripts/diadems_candidate_contracts.py
+            exit 0
+          elif [ -n "$BASE_VERSION" ]; then
             uv sync --locked --python 3.14 --extra all --extra messaging --group dev
           else
             uv sync --locked --python 3.13 --extra dev --extra messaging
@@ -167,7 +175,7 @@ jobs:
           # version-dependent contracts. Distance counts the Diadems patchset commits.
           [[ "$BASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           distance="$(git rev-list --count "$UPSTREAM_COMMIT..HEAD")"
-          uv run --no-sync python scripts/write_install_stamp.py --output install-stamp.json \
+          .venv/bin/python scripts/write_install_stamp.py --output install-stamp.json \
             --distribution docker --update-mechanism external --source ci \
             --commit "$SOURCE_COMMIT" --base-version "$BASE_VERSION" \
             --display-version "${BASE_VERSION}+diadems.${distance}" --distance "$distance"
