@@ -22,6 +22,7 @@ from gateway.session_events import SessionEvents
 from gateway.session_pending_controls import PendingControls
 from gateway.session_producer_lifecycle import drop_producer_turn, mark_producer_admission
 from hermes_cli.observability.shared_metrics_busy import busy_row_settled
+from hermes_state_api_queue import order_key
 from hermes_state_runtime import (
     STEERING, RuntimeStoreError, admit_session_input, begin_runtime_epoch,
     cancel_session_input, claim_session_input, get_session_admission,
@@ -326,7 +327,7 @@ class SessionAuthority:
             return rows
         rows = {row['admission_id']: row for row in rows}
         rows.update(masked)
-        return sorted(rows.values(), key=lambda row: row['seq'])
+        return sorted(rows.values(), key=order_key)
 
     def _handle(self, ref):
         row = self.db.get_session(ref.session_id)

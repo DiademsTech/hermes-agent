@@ -17,6 +17,7 @@ import json
 from dataclasses import dataclass
 
 from gateway.session_contract import SessionHandle, SessionRef
+from hermes_state_api_queue import order_key, ORDER_SQL
 from hermes_state_runtime import RuntimeStoreError
 
 # Sessions per worker-thread read; each batch is one await, so the loop serves other work between them.
@@ -51,9 +52,9 @@ def _store_facts(db, session_ids):
             "THEN json_extract(m.value, '$.entry.session_id') END WHERE m.key = ? || s.id) AS target_ended_at "
             "FROM sessions s WHERE s.id IN (SELECT value FROM json_each(?))", (POLICY_PREFIX, ids)).fetchall()
         pending = conn.execute(
-            "SELECT target_session_id, admission_id, seq, status FROM session_admissions "
+            "SELECT target_session_id, admission_id, seq, status, " + ORDER_SQL + " AS queue_order FROM session_admissions "
             "WHERE target_session_id IN (SELECT value FROM json_each(?)) "
-            "AND status IN ('queued','started','unknown') ORDER BY seq", (ids,)).fetchall()
+            "AND status IN ('queued','started','unknown') ORDER BY " + ORDER_SQL, (ids,)).fetchall()
     by_session: dict[str, list] = {}
     for row in pending:
         by_session.setdefault(row['target_session_id'], []).append(dict(row))
@@ -66,7 +67,7 @@ def _masked_pending(live, rows):
         return rows
     merged = {row['admission_id']: row for row in rows}
     merged.update(live.settling)
-    return sorted(merged.values(), key=lambda row: row['seq'])
+    return sorted(merged.values(), key=order_key)
 
 
 def _execution_state(pending) -> str:
