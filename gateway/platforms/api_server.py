@@ -51,6 +51,7 @@ _STATIC_FEATURE_FLAGS = {
     "run_guardrail_halt_incomplete": True,
     "run_events_memory_recall": True, "run_events_memory_recall_details": True,
     "automation_memory_auto_retain": True,
+    "run_events_message_interim": True,
     "session_messages_include_compacted": True,
     "session_auto_prune_idle_guard": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,

@@ -318,7 +318,7 @@ def test_relay_rewrite_precedes_sequential_policy_approval_checkpoint_and_dispat
     assert observed["start"] == expected
     assert observed["dispatch"] == expected
     assert observed["checkpoint"] == [
-        (str(Path("/approved/path")), "before write_file")
+        (str(Path("/approved/path").resolve()), "before write_file")
     ]
 
 

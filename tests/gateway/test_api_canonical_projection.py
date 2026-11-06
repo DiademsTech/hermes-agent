@@ -126,14 +126,46 @@ def _wrap(api, run_id, loop, sink):
     return callback
 
 
-def _wired_agent(turn):
+def _wired_agent(turn, want_interim=False):
     """The agent's tool sinks as TurnRunner wires them for an API admission."""
     from gateway.session_api_turn import wire_api_observers
     agent = SimpleNamespace(tool_progress_callback=None, status_callback=None, interim_assistant_callback=None,
                             tool_start_callback=turn.combined_tool_start_callback,
                             tool_complete_callback=turn.combined_tool_complete_callback)
-    wire_api_observers(agent, turn._approval_owner, False)
+    wire_api_observers(agent, turn._approval_owner, want_interim)
     return agent
+
+
+@pytest.mark.asyncio
+async def test_run_receives_memory_and_interim_only_for_its_live_generation(api, owner):
+    from gateway.session_results import execution_result
+
+    admitted = admit_api_turn(api, session_id='memory-events', user_message='hello', conversation_history=[])
+    launch, queue = _launch(api, admitted)
+    wired = []
+
+    async def handle(event):
+        agent = _wired_agent(_turn_runner(owner, admitted[1]), want_interim=True)
+        wired.append(agent)
+        agent.tool_progress_callback('memory.recall', phase='started')
+        agent.tool_progress_callback('memory.recall', phase='completed', returned=True,
+                                     count=1, memories=('Known preference',))
+        agent.interim_assistant_callback('I am checking the files.', already_streamed=False)
+        execution_result.get()['result'] = {'final_response': 'done'}
+        return 'done'
+
+    owner.runner._handle_message = handle
+    await _execute_run(api, launch, _api_server=_api_server)
+    await asyncio.sleep(0)  # flush the actual thread-safe event callbacks
+    events = _events(queue)
+    recall = [e for e in events if e['event'] == 'memory.recall']
+    assert [e['phase'] for e in recall] == ['started', 'completed']
+    assert recall[1]['memories'] == ['Known preference']
+    assert [e['text'] for e in events if e['event'] == 'message.interim'] == ['I am checking the files.']
+    wired[0].tool_progress_callback('memory.recall', phase='started')
+    wired[0].interim_assistant_callback('late callback')
+    await asyncio.sleep(0)
+    assert _events(queue) == []
 
 
 @pytest.mark.asyncio
