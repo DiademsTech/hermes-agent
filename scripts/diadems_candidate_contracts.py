@@ -6,6 +6,8 @@ import subprocess
 import sys
 
 CONTRACTS = (
+    "tests/tools/test_live_skill_grants.py",
+    "tests/tools/test_skill_usage.py",
     'tests/gateway/test_session_api.py',
     'tests/gateway/test_api_server_compaction_projection.py',
     'tests/gateway/test_api_server.py',
