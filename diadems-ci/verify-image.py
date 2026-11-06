@@ -21,6 +21,11 @@ async def verify(home: Path) -> None:
         importlib.import_module(name)
     from hermes_cli.config_defaults import DEFAULT_CONFIG
     assert DEFAULT_CONFIG['_config_version'] == 52
+    from tools.skills_sync import sync_skills
+    from tools import skill_usage
+    sync_skills(quiet=True)
+    assert skill_usage.set_locked('microsoft-office', True)
+    assert skill_usage.is_locked('microsoft-office')
 
     from aiohttp import web
     from aiohttp.test_utils import TestClient, TestServer
@@ -88,13 +93,16 @@ async def verify(home: Path) -> None:
             duration = time.monotonic() - started
             async with client.get("/v1/skills") as response:
                 assert response.status == 200
+                assert any(skill['name'] == 'microsoft-office' for skill in (await response.json())['data'])
             assert len(db.get_messages("live")) == 21
             assert db._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
             assert db._conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
         print(json.dumps({"clients": 10, "index_reads": len(samples), "message_reads": 10,
                           "writes": 20, "sessions": 8001, "journal_mode": "delete",
                           "elapsed_seconds": round(duration, 3), "max_read_seconds": round(max(samples), 3),
-                          "integrity": "ok", "skills": "ok", "firecrawl_import": "ok"}))
+                          "integrity": "ok", "skills": "ok", "firecrawl_import": "ok",
+                          "office_imports": "ok", "office_inventory": "ok", "curator_lock": "ok",
+                          "source_commit": stamp['commit']}))
 
 
 with tempfile.TemporaryDirectory(prefix="diadems-session-concurrency-") as directory:
