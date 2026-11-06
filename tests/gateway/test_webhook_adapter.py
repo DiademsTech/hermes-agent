@@ -130,7 +130,7 @@ def _svix_signature(body: bytes, secret: str, msg_id: str, timestamp: str) -> st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy", [None, False, True])
-async def test_retention_policy_comes_from_route_not_event_payload(policy):
+async def test_retention_policy_comes_from_route_not_event_payload(policy, monkeypatch):
     route = {"secret": "test-secret", "prompt": "Check the order"}
     if policy is not None:
         route["memory_auto_retain"] = policy
@@ -138,11 +138,12 @@ async def test_retention_policy_comes_from_route_not_event_payload(policy):
     event_received = asyncio.Event()
     events = []
 
-    async def capture(event):
+    async def capture(_adapter, event):
         events.append(event)
         event_received.set()
+        return None
 
-    adapter.handle_message = capture
+    monkeypatch.setattr("gateway.platforms.webhook_ingress.admit_producer", capture)
     body = json.dumps({"memory_auto_retain": policy is not True}).encode()
     request = _mock_request(
         headers={"X-Webhook-Signature": _generic_signature(body, "test-secret")},
