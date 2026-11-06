@@ -388,8 +388,10 @@ def _settled_api_result(authority, admission_id):
     if saved is None:
         from hermes_state_runtime import get_session_admission
         current = get_session_admission(authority.db, admission_id=admission_id)
-        if current['outcome'] == 'cancelled':
+        if current['outcome'] in {'cancelled', 'interrupted'}:
             return {'final_response': '', 'interrupted': True, 'completed': False}, {}
+        if current['outcome'] == 'steered':
+            return {'final_response': '', 'completed': True}, {}
         raise RuntimeStoreError('unknown_execution')
     return saved['result'], saved['usage']
 

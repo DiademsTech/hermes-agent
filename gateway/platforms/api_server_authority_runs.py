@@ -76,6 +76,10 @@ def run_projection(adapter, run_id):
     saved = admission_result(authority.db, row['admission_id'])
     result = saved.get('result', {}) if saved else {}
     if row['status'] == 'terminal':
+        if row['outcome'] == 'steering':
+            status = 'running'
+        elif row['outcome'] == 'steered':
+            status = 'completed'
         if result.get('interrupted') or row['outcome'] == 'interrupted':
             status = 'cancelled'
         elif result.get('failed') or result.get('error'):

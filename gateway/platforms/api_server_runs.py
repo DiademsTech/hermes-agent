@@ -283,6 +283,11 @@ def _initialize_run_state(self, *, store_factory) -> None:
 
 def _http_routes(self) -> list[tuple[str, str, Any]]:
     return [
+        ("GET", "/v1/runs", self._handle_list_runs),
+        ("PATCH", "/v1/runs/queue", self._handle_reorder_runs),
+        ("PATCH", "/v1/runs/{run_id}/queue", self._handle_edit_queued_run),
+        ("DELETE", "/v1/runs/{run_id}/queue", self._handle_cancel_queued_run),
+        ("POST", "/v1/runs/{run_id}/queue/steer", self._handle_steer_queued_run),
         ("POST", "/v1/runs", self._handle_runs), ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
@@ -1605,3 +1610,28 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
         if (status.get("status") in {"completed", "failed", "cancelled"}
                 and now - float(status.get("updated_at", 0) or 0) > self._RUN_STATUS_TTL):
             _forget_run(self, run_id, self._run_statuses, self._run_idempotency_ids)
+
+
+async def _handle_list_runs(self, request, *, _api_server):
+    from gateway.platforms.api_server_queue import handle
+    return await handle(self, request, action="list", _api_server=_api_server)
+
+
+async def _handle_reorder_runs(self, request, *, _api_server):
+    from gateway.platforms.api_server_queue import handle
+    return await handle(self, request, action="reorder", _api_server=_api_server)
+
+
+async def _handle_edit_queued_run(self, request, *, _api_server):
+    from gateway.platforms.api_server_queue import handle
+    return await handle(self, request, action="edit", _api_server=_api_server)
+
+
+async def _handle_steer_queued_run(self, request, *, _api_server):
+    from gateway.platforms.api_server_queue import handle
+    return await handle(self, request, action="steer", _api_server=_api_server)
+
+
+async def _handle_cancel_queued_run(self, request, *, _api_server):
+    from gateway.platforms.api_server_queue import handle
+    return await handle(self, request, action="cancel", _api_server=_api_server)

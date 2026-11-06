@@ -192,11 +192,12 @@ def find_session_admission(db, *, principal_id: str, session_id: str, request_id
 
 
 def list_session_admissions(db, *, session_id: str, pending_only: bool = True) -> list[dict]:
+    from hermes_state_api_queue import ORDER_SQL
     with db._read_ctx() as conn:
         # Pending is an explicit index-range IN, not ``!='terminal'``: a negated status cannot
         # bound the (target, status, seq) index, so every probe scanned the session's history.
         sql = ("SELECT * FROM session_admissions WHERE target_session_id=? "
-               + ("AND status IN ('queued','started','unknown') " if pending_only else "") + "ORDER BY seq")
+               + ("AND status IN ('queued','started','unknown') " if pending_only else "") + "ORDER BY " + ORDER_SQL)
         return [_row(row) for row in conn.execute(sql, (session_id,))]
 
 
@@ -223,7 +224,8 @@ def claim_session_input(db, *, epoch: int, session_id: str, _guard=None, head=_A
             raise RuntimeStoreError('unknown_execution')
         if blocked or workers:
             return None
-        row = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' ORDER BY seq LIMIT 1", (session_id,)).fetchone()
+        from hermes_state_api_queue import ORDER_SQL
+        row = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' ORDER BY " + ORDER_SQL + " LIMIT 1", (session_id,)).fetchone()
         if head is not _ANY_HEAD and (row['admission_id'] if row is not None else None) != head:
             return False
         if row is None:
@@ -312,13 +314,15 @@ def _requeue_transfer(conn, *, admission_id: str, epoch: int, generation: int) -
                         "AND generation=?", (admission_id, STEERING, epoch, generation)).rowcount == 1
 
 
-def steer_session_input(db, *, epoch: int, admission_id: str, generation: int) -> tuple[dict, bool]:
+def steer_session_input(db, *, epoch: int, admission_id: str, generation: int, _guard=None) -> tuple[dict, bool]:
     """Hand a still-queued admission to its FIFO's running claim: queued -> terminal ``steering``
     bound to ``generation`` in one write, only while ``generation`` is the started claim this owner
     holds, so the drain can never also claim it. ``(row, True)`` when this call committed the
     transfer, ``(row, False)`` for an exact retry of one already committed (never delivered twice)."""
     def write(conn):
         _epoch(conn, epoch)
+        if _guard is not None:
+            _guard(conn)
         row = _admission(conn, admission_id)
         if steer_replayed(row):
             return _row(row), False

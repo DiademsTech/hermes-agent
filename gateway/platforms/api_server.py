@@ -52,6 +52,8 @@ _STATIC_FEATURE_FLAGS = {
     "run_events_memory_recall": True, "run_events_memory_recall_details": True,
     "automation_memory_auto_retain": True,
     "run_events_message_interim": True,
+    "run_queue": True, "run_queue_controls": True, "run_clarify": True,
+    "run_controls_generation_bound": True,
     "session_messages_include_compacted": True,
     "session_auto_prune_idle_guard": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
@@ -3945,6 +3947,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _release_run_owner_if_forgotten(self, run_id: str) -> None:
         _api_runs._release_run_owner_if_forgotten(self, run_id)
 
+    _handle_list_runs = _run_route_delegate("_handle_list_runs")
+    _handle_reorder_runs = _run_route_delegate("_handle_reorder_runs")
+    _handle_edit_queued_run = _run_route_delegate("_handle_edit_queued_run")
+    _handle_steer_queued_run = _run_route_delegate("_handle_steer_queued_run")
+    _handle_cancel_queued_run = _run_route_delegate("_handle_cancel_queued_run")
     _handle_get_run = _run_route_delegate("_handle_get_run")
     _handle_run_events = _run_route_delegate("_handle_run_events")
     _handle_run_approval = _run_route_delegate("_handle_run_approval")

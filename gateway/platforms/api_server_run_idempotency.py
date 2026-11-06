@@ -217,6 +217,13 @@ class RunIdempotencyStore:
                 "SELECT 1 FROM run_idempotency WHERE scope=? AND run_id=?", (scope, run_id)).fetchone()
         return row is not None
 
+    def run_for_key(self, scope: str, key: str) -> str | None:
+        """Read the accepted identity after a lost ACK, without resubmitting input."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT run_id FROM run_idempotency WHERE scope=? AND idempotency_key=?", (scope, key)).fetchone()
+        return row[0] if row is not None else None
+
     def update_status(self, run_id: str, status: dict[str, Any]) -> None:
         with self._lock:
             self._conn.execute(

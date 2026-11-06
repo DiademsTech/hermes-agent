@@ -14,6 +14,7 @@ import asyncio
 from dataclasses import asdict
 from functools import partial
 
+from hermes_state_api_queue import order_key
 from hermes_state_runtime import (
     STEERING, RuntimeStoreError, check_replaced_input, find_session_admission, get_session_admission,
     replacement_binding, retire_replaced_input, revert_steer_input, steer_replayed, steer_session_input,
@@ -54,6 +55,13 @@ def queued_controls(authority, row):
     lists none, so its clients show none)."""
     payload = row.get('payload') or {}
     text = payload.get('text')
+    api = payload.get('api_turn_v1')
+    if (row.get('principal_id') == 'api' and row.get('status') == 'queued'
+            and isinstance(text, str) and text.strip() and isinstance(api, dict)
+            and not api.get('media') and api.get('history') is None
+            and not (api.get('settings') or {}).get('room_dispatch')
+            and not set(payload) - {'text', 'api_turn_v1', 'api_queue_v1'}):
+        return ['steer']
     if (row.get('status') != 'queued' or set(payload) - _TEXT_ONLY or not isinstance(text, str) or not text.strip()
             or (payload.get('display_v1') or {}).get('kind') == 'hidden'
             or not _interactive(authority, row['target_session_id'])):
@@ -71,7 +79,7 @@ def pending_rows(authority, ref):
         row = get_session_admission(authority.db, admission_id=admission_id)
         if row is not None and row['status'] == 'terminal' and row['outcome'] == STEERING:
             rows[admission_id] = row
-    return sorted(rows.values(), key=lambda row: row['seq'])
+    return sorted(rows.values(), key=order_key)
 
 
 async def _queued(connection, ref, admission_id):
@@ -133,7 +141,7 @@ def _deliver(authority, session_id, generation, agent, admission_id, text):
     return entry[1][admission_id]
 
 
-async def steer_queued(connection, ref, params):
+async def steer_queued(connection, ref, params, *, _guard=None):
     authority, admission_id = connection.authority, params['admission_id']
     authority.authorize(connection.actor, ref, 'session:control')
     receipt, row = await _queued(connection, ref, admission_id)
@@ -165,7 +173,7 @@ async def steer_queued(connection, ref, params):
     try:
         # The storage wait runs with no lock held; the registration above is the claim's fence.
         committed, fresh = await tracked_write(authority, partial(
-            steer_session_input, authority.db, epoch=authority.epoch, admission_id=admission_id, generation=generation))
+            steer_session_input, authority.db, epoch=authority.epoch, admission_id=admission_id, generation=generation, _guard=_guard))
     except RuntimeStoreError:
         # A definite refusal: nothing committed. Any other failure may follow a commit, so the fence
         # stays and the claim's settlement decides the row (a no-op when nothing committed).
