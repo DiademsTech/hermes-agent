@@ -184,7 +184,7 @@ def test_configured_model_choices_use_native_routes_and_refuse_unlisted_models(t
         assert selected["model"] == "deep-model"
         assert selected["override_reasoning_effort"] == "high"
         assert selected["override_api_key"] != "default-key"
-        assert selected["fallback_model"] == []
+        assert selected["routing_cfg"]["fallback_providers"] == []
         assert default["model"] == "default-child"
     finally:
         manager.unload()
