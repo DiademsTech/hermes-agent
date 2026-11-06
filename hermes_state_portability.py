@@ -217,6 +217,11 @@ class SessionPortabilityMixin:
             cls._session_compact_cols_sql = ", ".join(
                 f"s.{name}" for name in declared if name not in cls._SESSION_COMPACT_EXCLUDED
             )
+            # Presence only: list sorting must not hydrate full prompts under DELETE's shared lock.
+            cls._session_compact_cols_sql += (
+                ", (COALESCE(length(s.system_prompt), 0) > 0 OR "
+                "COALESCE(length(s.system_prompt_hash), 0) > 0) AS has_system_prompt"
+            )
         return cls._session_compact_cols_sql
 
     @classmethod
