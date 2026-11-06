@@ -235,6 +235,11 @@ class GatewayConfigLoadersMixin:
         if (policy := local_policy(self, source)) is not None:
             # A local session runs its frozen (or followed) level, not the profile's.
             return policy.current_reasoning_config(self, resolved_session_key)
+        from gateway.webhook_execution import source_choice
+        effort = source_choice(source).get("reasoning_effort")
+        if effort:
+            from hermes_constants import parse_reasoning_effort
+            return parse_reasoning_effort(effort)
         return self._load_reasoning_config(model)
 
     def _set_session_reasoning_override(self, session_key: str, reasoning_config: Optional[dict]) -> None:

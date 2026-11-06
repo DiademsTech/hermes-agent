@@ -223,6 +223,16 @@ def _cmd_subscribe(args):
         "profile": profile,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
+    from gateway.webhook_execution import normalize_choice
+    try:
+        choice = normalize_choice({key: (getattr(args, key, None) if getattr(args, key, None) is not None
+                                        else existing.get(key))
+                                   for key in ("model", "provider", "reasoning_effort")})
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return
+    route.update(choice)
+
     if getattr(args, "deliver_only", False):
         if getattr(args, "cron_job", ""):
             print(

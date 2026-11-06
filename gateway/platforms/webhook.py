@@ -809,6 +809,8 @@ class WebhookAdapter(BasePlatformAdapter):
         self._delivery_info_order.append((now, session_chat_id))
         self._prune_delivery_info(now)
         source = self._admission_source(route_name, profile, delivery_id)
+        from gateway.webhook_execution import normalize_choice
+        source.webhook_execution = normalize_choice(route_config)
         source.memory_auto_retain = route_config.get("memory_auto_retain", False) is True
         event = MessageEvent(text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload,
                              message_id=delivery_id, timestamp=datetime.fromtimestamp(0, UTC))
@@ -1036,7 +1038,10 @@ class WebhookAdapter(BasePlatformAdapter):
                     return SendResult(success=False, error=f"No chat_id or home channel for {platform_name}")
                 chat_id = home.chat_id
             thread_id = extra.get("message_thread_id") or extra.get("thread_id")  # Telegram forum topics
-            result = await adapter.send(chat_id, content, metadata={"thread_id": thread_id} if thread_id else None)
+            metadata = {"thread_id": thread_id} if thread_id else {}
+            if platform_name == "http_callback" and delivery.get("source_session_id"):
+                metadata["source_session_id"] = delivery["source_session_id"]
+            result = await adapter.send(chat_id, content, metadata=metadata or None)
             if result.success:
                 self._mirror_delivery(platform_name, str(chat_id), content, delivery, thread_id)
             return result

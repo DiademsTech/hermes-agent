@@ -101,6 +101,7 @@ class SessionSource:
     # sender id is kept (Telegram observe mode: commands keep user_id for slash access checks).
     shared_session: bool = False
     memory_auto_retain: bool = True
+    webhook_execution: Optional[dict[str, str]] = None
     # Wire-INVISIBLE trust signal (never in to_dict/from_dict, so a peer cannot forge it): came
     # over the authenticated relay WebSocket. ``platform`` is the UNDERLYING platform, not
     # ``relay``, so authz must key upstream trust off THIS flag.
@@ -137,7 +138,7 @@ class SessionSource:
     _ALWAYS_FIELDS = ("chat_id", "chat_name", "chat_type", "user_id", "user_name", "thread_id", "chat_topic", "memory_auto_retain")
     _OPTIONAL_PRE_SCOPE = ("user_id_alt", "chat_id_alt")
     _OPTIONAL_POST_SCOPE = ("parent_chat_id", "message_id", "profile")
-    _OPTIONAL_TAIL = ("auto_thread_initial_name", "prospective_thread_id")
+    _OPTIONAL_TAIL = ("auto_thread_initial_name", "prospective_thread_id", "webhook_execution")
 
     def to_dict(self) -> dict[str, Any]:
         d = {"platform": self.platform.value}

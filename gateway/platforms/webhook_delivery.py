@@ -82,7 +82,7 @@ def retained_destination(adapter, chat_id):
     candidates = [scoped] if scoped is not None else serving_authorities(runner)
     # Only the signed ingress admission carries the destination; later automation rows
     # (process/watch completions) on the same chat share its source but never compete.
-    query = """SELECT payload_json FROM session_admissions
+    query = """SELECT payload_json, target_session_id FROM session_admissions
         WHERE json_extract(payload_json, '$.native_text_v1.source.chat_id')=?
           AND json_extract(payload_json, '$.native_text_v1.source.platform')='webhook'
           AND json_extract(payload_json, '$.native_text_v1.automation') IS NULL"""
@@ -97,4 +97,7 @@ def retained_destination(adapter, chat_id):
         raise RuntimeStoreError('permission_denied')
     if envelope.get('webhook_route') != route_digest(adapter, chat_id):
         raise RuntimeStoreError('admission_conflict')
-    return validate_destination(envelope.get('webhook_delivery'))
+    destination = validate_destination(envelope.get('webhook_delivery'))
+    if destination['deliver'] == 'http_callback':
+        destination['source_session_id'] = rows[0]['target_session_id']
+    return destination
