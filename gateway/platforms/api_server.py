@@ -58,6 +58,7 @@ _STATIC_FEATURE_FLAGS = {
     "run_inline_delegations": True, "run_status_subagents": True,
     "session_messages_include_compacted": True,
     "session_auto_prune_idle_guard": True,
+    "diadems_pc_passwords": True,
     "run_status": True, "run_events_sse": True, "run_stop": True, "run_steer": True,
     "run_approval_response": True, "tool_progress_events": True, "approval_events": True,
     "session_resources": True, "model_options": True, "session_chat": True,
