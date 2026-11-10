@@ -55,6 +55,9 @@ CONTRACTS = (
     'tests/agent/test_stall_guards.py',
     'tests/agent/test_intent_ack_continuation.py',
     'tests/agent/test_turn_end_stall_diagnostics.py',
+    'tests/plugins/test_diadems_pc_passwords_plugin.py',
+    'tests/hermes_cli/test_login_backend_provenance.py',
+    'tests/agent/test_vault_backend_registry.py',
 )
 
 
