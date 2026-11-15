@@ -100,6 +100,9 @@ async def _start_cron_job(_gw):
 
     async def finish():
         await asyncio.to_thread(sched.release_running_job, "job-1")
+        # The release hands the republish to the loop (call_soon_threadsafe); this task can resume
+        # first, so yield once to let it run, as a later tick would in the gateway.
+        await asyncio.sleep(0)
 
     return finish
 
