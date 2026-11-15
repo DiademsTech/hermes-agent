@@ -242,6 +242,7 @@ class GatewayTurnPrepareMixin:
         else:
             _log_missing_session_override(self, skey, model)
 
+        from gateway.run import _resolve_runtime_agent_kwargs_for_provider
         from gateway.webhook_execution import source_choice
         automation = source_choice(source)
         if not override and automation.get("model"):
