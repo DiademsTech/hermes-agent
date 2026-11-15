@@ -11,16 +11,21 @@ import tempfile
 import time
 from pathlib import Path
 
+# Config schema of each approved release line (Hermes bumps it on a required field).
+CONFIG_VERSIONS = {"0.23.0": 52, "0.23.1": 53}
+BASE_VERSION = os.environ.get("EXPECTED_BASE_VERSION") or "0.23.0"
+CONFIG_VERSION = CONFIG_VERSIONS[BASE_VERSION]
+
 
 async def verify(home: Path) -> None:
     import importlib
     stamp = json.loads(Path('/opt/hermes/install-stamp.json').read_text())
     assert stamp['commit'] == os.environ['EXPECTED_SOURCE_COMMIT'], stamp['commit']
-    assert stamp['baseVersion'] == '0.23.0'
+    assert stamp['baseVersion'] == BASE_VERSION, stamp['baseVersion']
     for name in ('docx', 'openpyxl', 'pptx', 'firecrawl'):
         importlib.import_module(name)
     from hermes_cli.config_defaults import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG['_config_version'] == 52
+    assert DEFAULT_CONFIG['_config_version'] == CONFIG_VERSION
     from tools.skills_sync import sync_skills
     from tools import skill_usage
     sync_skills(quiet=True)
@@ -108,5 +113,5 @@ async def verify(home: Path) -> None:
 with tempfile.TemporaryDirectory(prefix="diadems-session-concurrency-") as directory:
     home = Path(directory)
     os.environ["HERMES_HOME"] = str(home)
-    (home / "config.yaml").write_text("_config_version: 52\ndatabase:\n  journal_mode: delete\nsecurity:\n  allow_lazy_installs: false\n", encoding="utf-8")
+    (home / "config.yaml").write_text(f"_config_version: {CONFIG_VERSION}\ndatabase:\n  journal_mode: delete\nsecurity:\n  allow_lazy_installs: false\n", encoding="utf-8")
     asyncio.run(verify(home))

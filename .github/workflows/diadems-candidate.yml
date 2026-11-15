@@ -75,7 +75,7 @@ jobs:
         run: |
           # SemVer releases (v0.22+) run on Python 3.14 with dev as a dependency group;
           # calendar tags keep their Python 3.13 extras.
-          if [ "$BASE_VERSION" = "0.23.0" ]; then
+          if [[ "$BASE_VERSION" == 0.23.* ]]; then
             uv python install 3.14
             bootstrap_python="$(uv python find 3.14)"
             "$bootstrap_python" -m pm.build_env --source . --out .venv \
@@ -246,6 +246,7 @@ jobs:
         env:
           IMAGE_DIGEST: ${{ inputs.verify_digest }}
           EXPECTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          EXPECTED_BASE_VERSION: ${{ inputs.base_version || '0.23.0' }}
         run: |
           [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
@@ -254,7 +255,7 @@ jobs:
           docker run --rm -i --network none --read-only \
             --tmpfs /tmp:rw,exec,nosuid,size=512m --tmpfs /opt/data:rw,exec,nosuid,size=512m \
             --user hermes --workdir /opt/hermes \
-            --env EXPECTED_SOURCE_COMMIT --env PYTHONPATH=/opt/hermes \
+            --env EXPECTED_SOURCE_COMMIT --env EXPECTED_BASE_VERSION --env PYTHONPATH=/opt/hermes \
             --entrypoint /opt/hermes/.venv/bin/python "$image" - < diadems-ci/verify-image.py
           echo "Sealed image imports, health/capabilities, native skills and DELETE concurrency passed." >> "$GITHUB_STEP_SUMMARY"
           echo "Kata/virtiofs, mounted memory/auth dependencies and canary remain separate gates." >> "$GITHUB_STEP_SUMMARY"
