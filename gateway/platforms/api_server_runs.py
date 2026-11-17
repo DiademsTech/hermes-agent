@@ -808,6 +808,38 @@ def _run_cwd(body, _openai_error) -> tuple:
     return target, None
 
 
+async def _stored_run_cwd(self, session_id: str) -> Optional[str]:
+    """The folder a previous run of *session_id* persisted (``sessions.cwd``), revalidated.
+
+    Turns a client starts without ``cwd`` (a wake, a voice turn, a queued message) keep the
+    session's folder. A stored folder that no longer exists, or that left ``terminal.cwd``, is
+    ignored rather than refused: the run then works in the profile folder as before."""
+    if not session_id:
+        return None
+    db = await self._ensure_session_db_async()
+    if db is None:
+        return None
+    try:
+        row = await asyncio.to_thread(db.get_session, session_id)
+    except Exception:
+        return None
+    stored = (row or {}).get("cwd") if isinstance(row, dict) else None
+    if not isinstance(stored, str) or not stored:
+        return None
+    cwd, error = _run_cwd({"cwd": stored}, lambda *a, **k: None)
+    return cwd if error is None else None
+
+
+def _persist_run_cwd(self, session_id: str, cwd: str) -> None:
+    """Remember the run's folder on its session row (executor thread, best effort)."""
+    if not session_id or not cwd:
+        return
+    with suppress(Exception):
+        db = self._ensure_session_db()
+        if db is not None:
+            db.update_session_cwd(session_id, cwd)
+
+
 def _bind_run_terminal_cwd(cwd: str):
     """Pin ``TERMINAL_CWD`` to *cwd* for this run's terminal scope -> ``(token, reset)`` or ``None``.
 
@@ -965,6 +997,9 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
     session_history_delivery = not previous_response_id and not conversation_history
     if not conversation_history and selected_session_id and not previous_response_id:
         conversation_history = await self._conversation_history_for_session(str(selected_session_id))
+    if run_cwd is None and selected_session_id:
+        # A turn started without ``cwd`` (wake, voice, queued message) keeps the session's folder.
+        run_cwd = await _stored_run_cwd(self, str(selected_session_id))
     q = self._run_streams[run_id] = _RunStream()
     created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
@@ -1104,6 +1139,11 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
         finally:
             # Clear ownership now so a later stop can't reap work this run left running.
             _api_server._clear_turn_process_ownership(agent)
+            if run.cwd:
+                # The row exists once the turn ran: later turns without ``cwd`` keep this folder.
+                # (after a compression rotation the agent's session id names the live row)
+                live_id = getattr(agent, "session_id", None)
+                _persist_run_cwd(self, live_id if isinstance(live_id, str) and live_id else session_id, run.cwd)
             self._memory_sessions.checkin(agent)
             # Declared-conversation binding, same precedence gate as _run_agent.
             if run.declared_selected:
