@@ -92,6 +92,29 @@ async def test_run_without_cwd_keeps_the_profile_folder(workspace):
 
 
 @pytest.mark.asyncio
+async def test_a_later_turn_without_cwd_keeps_the_session_folder(workspace, tmp_path):
+    """A wake, a voice turn or a queued message names no folder: the session's stored one applies."""
+    from hermes_state import SessionDB
+
+    adapter, seen = _adapter(), []
+    adapter._session_db = SessionDB(db_path=tmp_path / "state.db")
+    adapter._session_db.create_session("dia-project", source="api_server")
+    project = os.path.realpath(workspace / "projects" / "compta")
+    async with TestClient(TestServer(_app(adapter))) as cli:
+        with patch.object(adapter, "_create_agent", side_effect=lambda *a, **k: _observing_agent(seen)):
+            first = await cli.post("/v1/runs", json={"input": "hi", "cwd": project, "session_id": "dia-project"})
+            assert first.status == 202
+            await async_wait_until(lambda: len(seen) == 1, what="first run")
+            await async_wait_until(
+                lambda: (adapter._session_db.get_session("dia-project") or {}).get("cwd") == project,
+                what="folder stored on the session")
+            second = await cli.post("/v1/runs", json={"input": "wake", "session_id": "dia-project"})
+            assert second.status == 202
+            await async_wait_until(lambda: len(seen) == 2, what="second run")
+    assert seen[1]["terminal"] == project
+
+
+@pytest.mark.asyncio
 async def test_concurrent_runs_keep_their_own_folders(workspace):
     adapter, seen = _adapter(), []
     gate, first, second = threading.Event(), threading.Event(), threading.Event()
