@@ -653,6 +653,7 @@ class _RunLaunch:
     turn_author: Optional[dict[str, Any]] = None  # memory-attribution label only; grants nothing
     admission: Any = None
     walked_from: Optional[str] = None  # the swept stored session the chain moved past (``bind_api_steps``)
+    cwd: Optional[str] = None  # validated working folder under the profile's terminal.cwd (``_run_cwd``)
 
     @property
     def approval_session_key(self) -> str:
@@ -779,6 +780,50 @@ def _run_idempotency_identity(self, request, body, gateway_session_key, idempote
     ).encode()).hexdigest()
 
 
+def _run_cwd(body, _openai_error) -> tuple:
+    """POST /v1/runs ``cwd`` -> ``(real path or None, error_response_or_None)``.
+
+    A run may work in a sub-folder of its profile's configured ``terminal.cwd`` (a project folder):
+    the logical session cwd then drives context-file discovery (its ``AGENTS.md``), the system
+    prompt and the terminal of THIS run only. The folder must already exist and, once symlinks are
+    resolved, stay inside ``terminal.cwd``; anything else is refused so a client never widens the
+    agent's working root. Omitted / ``null`` keeps today's behaviour."""
+    raw = body.get("cwd") if isinstance(body, dict) else None
+    if raw is None or raw == "":
+        return None, None
+    if not isinstance(raw, str) or len(raw) > 4096 or "\x00" in raw or not os.path.isabs(raw):
+        return None, _json_error(_openai_error, "cwd must be an absolute path", code="invalid_cwd", status=400)
+    from tools.terminal_scope import terminal_env
+    root_raw = (terminal_env("TERMINAL_CWD") or "").strip()
+    if not root_raw or not os.path.isabs(root_raw):
+        return None, _json_error(
+            _openai_error, "this profile has no configured working directory", code="cwd_unavailable", status=409)
+    root = os.path.realpath(root_raw)
+    target = os.path.realpath(raw)
+    if target != root and not target.startswith(root.rstrip(os.sep) + os.sep):
+        return None, _json_error(
+            _openai_error, "cwd must stay inside the profile working directory", code="invalid_cwd", status=400)
+    if not os.path.isdir(target):
+        return None, _json_error(_openai_error, "cwd is not an existing directory", code="invalid_cwd", status=400)
+    return target, None
+
+
+def _bind_run_terminal_cwd(cwd: str):
+    """Pin ``TERMINAL_CWD`` to *cwd* for this run's terminal scope -> ``(token, reset)`` or ``None``.
+
+    The terminal tool reads its start folder from the bound terminal scope (or the process env when
+    none is bound, a single-profile gateway); a refusal scope stays a refusal (fail closed)."""
+    from tools.terminal_scope import (
+        TerminalPolicyRefusal, get_terminal_scope, reset_terminal_scope, set_terminal_scope)
+    scope = get_terminal_scope()
+    if isinstance(scope, TerminalPolicyRefusal):
+        return None
+    base = dict(scope) if isinstance(scope, dict) else {
+        k: v for k, v in os.environ.items() if k.startswith("TERMINAL_")}
+    base["TERMINAL_CWD"] = cwd
+    return set_terminal_scope(base), reset_terminal_scope
+
+
 def _run_user_message(raw_input, _openai_error) -> tuple:
     """POST /v1/runs ``input`` -> ``(user_message, error_response_or_None)``."""
     if not raw_input:
@@ -865,6 +910,9 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
         turn_author = _api_server._request_turn_author(body)
     except ValueError as exc:
         return _json_error(_openai_error, str(exc), code="invalid_author", status=400)
+    run_cwd, cwd_err = _run_cwd(body, _openai_error)
+    if cwd_err is not None:
+        return cwd_err
     conversation_history, instructions, stored_session_id, history_err, walked_from = await _resolve_chained_history(
         self, body, raw_input, _openai_error=_openai_error)
     if history_err is not None:
@@ -941,7 +989,8 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,
             **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
         request_profile=_api_server._api_request_profile.get(),
-        turn_author=turn_author, walked_from=walked_from if session_id == stored_session_id else None)
+        turn_author=turn_author, walked_from=walked_from if session_id == stored_session_id else None,
+        cwd=run_cwd)
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
     # receipt drives this run's status, so `peer run` keeps its run_id and `peer status` still works.
@@ -1035,9 +1084,11 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
                 # so it stays default-denied until a merge contract exists for that chain;
                 # likewise a caller-supplied conversation_history is authoritative for the
                 # turn and never reads the delivery row, so it is denied the same way.
-                session_history_delivery="1" if run.session_history_delivery else "")
+                session_history_delivery="1" if run.session_history_delivery else "", cwd=run.cwd or "")
             if session_tokens:
                 resets.append((session_tokens, clear_session_vars))
+            if run.cwd and (pinned := _bind_run_terminal_cwd(run.cwd)) is not None:
+                resets.append(pinned)
             if run.agent_kwargs["room_dispatch"] is not None:
                 policy = RoomExecutionPolicy.from_mapping(run.agent_kwargs["room_execution_policy"] or {})
                 resets.append((bind_room_execution_policy(policy), reset_room_execution_policy))
