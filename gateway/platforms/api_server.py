@@ -53,7 +53,7 @@ _STATIC_FEATURE_FLAGS = {
     "automation_memory_auto_retain": True,
     "webhook_execution_model": True, "webhook_result_session": True,
     "run_events_message_interim": True,
-    "run_queue": True, "run_queue_controls": True, "run_clarify": True,
+    "run_queue": True, "run_queue_controls": True, "run_clarify": True, "run_session_cwd": True,
     "run_controls_generation_bound": True,
     "run_inline_delegations": True, "run_status_subagents": True,
     "session_messages_include_compacted": True,
@@ -3632,7 +3632,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     @staticmethod
     def _bind_api_server_session(
         *, chat_id: str = "", session_key: str = "", session_id: str = "", profile: str = "",
-        session_history_delivery: str = "") -> list:
+        session_history_delivery: str = "", cwd: str = "") -> list:
         """Bind an API turn with push disabled and history delivery default-denied.
 
         Only routes whose continuation reads SessionDB may pass "1". An omitted
@@ -3640,11 +3640,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
         ``profile`` is the ``/p/<profile>/`` prefix serving the request (``""`` = default). It must
         reach ``HERMES_SESSION_PROFILE``: the persistent-Docker container key is derived from it, so an
-        unbound profile collapses every profile's turns onto the default sandbox (#96370)."""
+        unbound profile collapses every profile's turns onto the default sandbox (#96370).
+
+        ``cwd`` is the run's validated working folder (``POST /v1/runs`` ``cwd``); ``""`` keeps the
+        profile's configured ``terminal.cwd``."""
         from gateway.session_context import set_session_vars
         return set_session_vars(
             platform="api_server", chat_id=chat_id, session_key=session_key, session_id=session_id,
-            profile=profile, async_delivery=False, cron_session="", session_history_delivery=session_history_delivery)
+            profile=profile, cwd=cwd, async_delivery=False, cron_session="",
+            session_history_delivery=session_history_delivery)
 
     def _turn_runtime_metadata(
         self, agent: Any, *, route: Optional[dict[str, Any]], requested_runtime: Optional[dict[str, Any]],
