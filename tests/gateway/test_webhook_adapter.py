@@ -145,8 +145,10 @@ async def test_retention_policy_comes_from_route_not_event_payload(policy, monke
 
     monkeypatch.setattr("gateway.platforms.webhook_ingress.admit_producer", capture)
     body = json.dumps({"memory_auto_retain": policy is not True}).encode()
+    timestamp = str(int(time.time()))
     request = _mock_request(
-        headers={"X-Webhook-Signature": _generic_signature(body, "test-secret")},
+        headers={"X-Webhook-Timestamp": timestamp,
+                 "X-Webhook-Signature-V2": _generic_v2_signature(body, "test-secret", timestamp)},
         body=body, match_info={"route_name": "orders"},
     )
     response = await adapter._handle_webhook(request)
