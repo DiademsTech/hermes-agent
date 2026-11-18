@@ -58,6 +58,7 @@ CONTRACTS = (
     'tests/plugins/test_diadems_pc_passwords_plugin.py',
     'tests/hermes_cli/test_login_backend_provenance.py',
     'tests/agent/test_vault_backend_registry.py',
+    'tests/gateway/test_api_server_run_cwd.py',
 )
 
 
