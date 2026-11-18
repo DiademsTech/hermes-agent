@@ -50,3 +50,17 @@ def test_read_only_plugin_stages_and_cleans_up(tmp_path, monkeypatch):
     finally:
         for dirpath, _dirs, _files in os.walk(tmp_path):
             os.chmod(dirpath, stat.S_IRWXU)
+
+
+def test_copies_of_dead_processes_are_swept(tmp_path, monkeypatch):
+    dead = tmp_path / "hermes-provider-plugins-999999-abc"
+    live = tmp_path / f"hermes-provider-plugins-{os.getpid()}-abc"
+    unnamed_old, unnamed_new = tmp_path / "hermes-provider-plugins-old", tmp_path / "hermes-provider-plugins-new"
+    other = tmp_path / "unrelated"
+    for path in (dead, live, unnamed_old, unnamed_new, other):
+        (path / "plugin").mkdir(parents=True)
+    os.chmod(dead / "plugin", 0o555)  # a read-only copy left by an older release
+    os.utime(unnamed_old, (0, 0))
+    monkeypatch.setattr(plugin_reload, "_alive", lambda pid: pid != 999999)
+    plugin_reload._sweep_stale_roots(tmp_path)
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([live.name, unnamed_new.name, other.name])

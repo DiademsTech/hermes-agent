@@ -17,11 +17,13 @@ import atexit
 import hashlib
 import logging
 import os
+import re
 import shutil
 import stat
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,46 @@ def _rmtree(path: Path) -> None:
         shutil.rmtree(path, onexc=unlock)
 
 
+_ROOT_PREFIX = "hermes-provider-plugins-"
+_ROOT_PID = re.compile(rf"^{_ROOT_PREFIX}(\d+)-")
+# A root without its owner's pid (written before roots were named after it) is swept once this old.
+_UNNAMED_ROOT_AGE = 600
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _sweep_stale_roots(tmp: Path) -> None:
+    """Remove the copies of processes that are gone: a killed process (a gateway stopped by its container)
+    never runs its ``atexit`` cleanup, and each copy holds a whole plugin tree."""
+    try:
+        entries = list(tmp.iterdir())
+    except OSError:
+        return
+    now = time.time()
+    for entry in entries:
+        if not entry.name.startswith(_ROOT_PREFIX) or entry.is_symlink() or not entry.is_dir():
+            continue
+        match = _ROOT_PID.match(entry.name)
+        try:
+            if match:
+                pid = int(match.group(1))
+                if pid == os.getpid() or _alive(pid):
+                    continue
+            elif now - entry.stat().st_mtime < _UNNAMED_ROOT_AGE:
+                continue
+            _rmtree(entry)
+        except OSError:
+            continue
+
+
 def _snapshot(plugin_dir: Path, module_name: str) -> Path:
     """A frozen copy of *plugin_dir* for *module_name* (per home, plugin and tree), named like the original
     (load errors key on it). Copied into a private directory and published by one rename, so a concurrent scan
@@ -66,7 +108,8 @@ def _snapshot(plugin_dir: Path, module_name: str) -> Path:
     global _snapshot_root
     with _snapshot_lock:
         if _snapshot_root is None:
-            _snapshot_root = Path(tempfile.mkdtemp(prefix="hermes-provider-plugins-"))
+            _sweep_stale_roots(Path(tempfile.gettempdir()))
+            _snapshot_root = Path(tempfile.mkdtemp(prefix=f"{_ROOT_PREFIX}{os.getpid()}-"))
             atexit.register(_rmtree, _snapshot_root)
     target = _snapshot_root / module_name / plugin_dir.name
     if target.is_dir():
