@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 # Config schema of each approved release line (Hermes bumps it on a required field).
-CONFIG_VERSIONS = {"0.23.0": 52, "0.23.1": 53}
+CONFIG_VERSIONS = {"0.23.0": 52, "0.23.1": 53, "0.23.2": 53}
 BASE_VERSION = os.environ.get("EXPECTED_BASE_VERSION") or "0.23.0"
 CONFIG_VERSION = CONFIG_VERSIONS[BASE_VERSION]
 
