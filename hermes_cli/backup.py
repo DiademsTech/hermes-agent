@@ -32,6 +32,7 @@ from hermes_cli.config_backend import drop_other_access, require_file_tooling, s
 from hermes_cli.home_data_layout import BRIDGE_LOG_PARTS, PM_RUNTIME_ROOT_DIRS, SECRET_CACHE_FILES, profile_root_entry
 from hermes_cli.sizefmt import format_bytes as _format_size
 
+from hermes_cli.host_owned import is_host_owned
 from hermes_cli.backup_restore import (
     _count_cron_jobs,
     _count_session_rows,
@@ -322,7 +323,8 @@ def _iter_backup_files(hermes_root: Path, out_path: Path, skipped_dirs: Optional
         kept = [
             d for d in dirnames
             if (d not in _EXCLUDED_DIRS or (d == "hermes-agent" and not is_root))
-            and not _in_excluded_root_dir(rel_dir / d)]
+            and not _in_excluded_root_dir(rel_dir / d)
+            and not is_host_owned((rel_dir / d).parts)]
         if skipped_dirs is not None:
             skipped_dirs.update(str(rel_dir / d) for d in set(dirnames) - set(kept))
         # No walk may follow a junction.
@@ -333,7 +335,7 @@ def _iter_backup_files(hermes_root: Path, out_path: Path, skipped_dirs: Optional
             fpath = hermes_root / rel
             # zipfile.write() follows file symlinks, so skip links before any archive write can
             # copy data from outside HERMES_HOME; never archive the output zip into itself.
-            if _should_exclude(rel):
+            if _should_exclude(rel) or is_host_owned(rel.parts):
                 continue
             if _is_non_regular_path(fpath):
                 continue

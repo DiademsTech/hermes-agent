@@ -61,6 +61,7 @@ from typing import Any, Callable, Optional
 
 from hermes_cli.archive_safe import normalize_archive_parts
 from hermes_cli.home_data_layout import HOME_ENV_FILES
+from hermes_cli.host_owned import is_host_owned
 
 logger = logging.getLogger(__name__)
 
@@ -449,7 +450,8 @@ class KeepHostImport:
     def skips(self, parts: tuple[str, ...]) -> bool:
         """Members the destination keeps its own copy of."""
         home = _home_parts(parts)
-        return (parts[-2:] == _SHARED_NOUS_STORE or (len(parts) == 1 and parts[0] in _HOST_ROOT_FILES)
+        return (is_host_owned(parts) or parts[-2:] == _SHARED_NOUS_STORE
+                or (len(parts) == 1 and parts[0] in _HOST_ROOT_FILES)
                 or parts == (_PROFILES_MANIFEST,)
                 or (len(parts) > 1 and parts[0] in _HOST_ROOT_DIRS)
                 or (parts[-1].endswith(".lock") and home[0] not in _CONTENT_TREES))
@@ -595,6 +597,8 @@ class KeepHostImport:
         if parts[0] == "profiles" and (len(parts) < 3 or parts[1] not in self.profiles):
             return False
         if parts[0] in _HOME_ENTRIES or (parts[0].startswith(".") and parts[0] not in _AGENT_DOTFILES):
+            return False
+        if is_host_owned(parts):
             return False
         home = _home_parts(parts)
         return not (parts in _ROOT_HOST_FILES or _is_auth_store(parts) or self.skips(parts)
