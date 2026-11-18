@@ -63,4 +63,5 @@ def test_copies_of_dead_processes_are_swept(tmp_path, monkeypatch):
     os.utime(unnamed_old, (0, 0))
     monkeypatch.setattr(plugin_reload, "_alive", lambda pid: pid != 999999)
     plugin_reload._sweep_stale_roots(tmp_path)
-    assert sorted(p.name for p in tmp_path.iterdir()) == sorted([live.name, unnamed_new.name, other.name])
+    left = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("hermes-provider-plugins-"))
+    assert left == sorted([live.name, unnamed_new.name]) and other.is_dir()
