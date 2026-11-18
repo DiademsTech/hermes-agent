@@ -22,7 +22,7 @@ _TOOL_SINKS = {'tool_start_callback', 'tool_complete_callback'}
 _SETTING_KEYS = ('ephemeral_system_prompt', 'requested_model', 'requested_provider',
                  'model_options', 'route', 'session_model', 'confirmed_runtime_lock',
                  'requested_runtime', 'route_source', 'room_dispatch', 'room_execution_policy',
-                 'session_history_delivery')
+                 'session_history_delivery', 'cwd')
 _OWNER_SCOPE_RE = re.compile(r'[0-9a-f]{64}')
 
 
@@ -77,11 +77,28 @@ def _valid_owner_scope(value):
 
 def api_session_vars():
     """Session-context fields an executing API admission binds beyond the shared source:
-    #98619 history-delivery provenance. ``{}`` when no API admission is executing."""
+    #98619 history-delivery provenance, and the run's validated working folder (``POST /v1/runs``
+    ``cwd``, kept in the session's settings for its later payload-less turns). ``{}`` when no API
+    admission is executing."""
     current = api_execution.get()
     if current is None:
         return {}
-    return {'session_history_delivery': current['settings'].get('session_history_delivery') or ''}
+    settings = current['settings']
+    return {'session_history_delivery': settings.get('session_history_delivery') or '',
+            'cwd': settings.get('cwd') or ''}
+
+
+def seed_api_terminal_cwd(session_key, cwd):
+    """Start the terminal of an admitted API turn in its working folder: the terminal reads its start
+    folder from the session's recorded cwd before ``TERMINAL_CWD``. A folder the agent already moved
+    to inside *cwd* is kept, so its ``cd`` survives later turns; anything else is reset to *cwd*."""
+    if not cwd or not session_key:
+        return
+    from tools.terminal_tool import get_session_cwd, record_session_cwd
+    recorded = get_session_cwd(session_key) or ''
+    root = cwd.rstrip('/')
+    if recorded != cwd and not recorded.startswith(root + '/'):
+        record_session_cwd(session_key, cwd)
 
 
 def check_api_settings(adapter, settings):

@@ -887,7 +887,7 @@ async def _admit_run_to_authority(
                 history_from_session=session_history_delivery,
                 session_history_delivery='1' if launch.session_history_delivery else '',
                 bind_declared_conversation=_declared_selected, walked_from=launch.walked_from,
-                **launch.agent_kwargs)
+                cwd=launch.cwd, **launch.agent_kwargs)
     except Exception as exc:  # health: allow BLE001 -- answered below; a committed admission is kept
         # A storage failure after the admission committed (a later media-release write) still
         # owns that run: forgetting it would let a keyed retry admit the same work twice.
@@ -1039,6 +1039,10 @@ async def _handle_runs(self, request: web.Request, *, _api_server) -> web.Respon
             idempotency_scope, idempotency_key, _openai_error)
         if refused is not None:
             return refused
+        if launch.cwd and launch.admission is not None:
+            # The session row exists once admitted: a later turn started without ``cwd`` (a voice
+            # turn, a queued message) reads it back through ``_stored_run_cwd``.
+            await asyncio.to_thread(_persist_run_cwd, self, str(launch.admission[1].session_id), launch.cwd)
     self._activate_admitted_request()
     if admitted is not None:
         task = self._active_run_tasks[run_id] = asyncio.create_task(

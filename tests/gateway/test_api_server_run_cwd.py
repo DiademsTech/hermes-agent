@@ -177,3 +177,76 @@ async def test_cwd_without_a_configured_working_directory_is_refused(tmp_path, m
         body = await resp.json()
     assert resp.status == 409
     assert body["error"]["code"] == "cwd_unavailable"
+
+
+# --- The session authority path: a run admitted to the canonical FIFO executes elsewhere ----------
+
+
+def test_the_admission_keeps_the_folder_in_its_settings():
+    from gateway.session_api_turn import _SETTING_KEYS
+
+    # Settings are the only admission field the executing turn reads back (and the session keeps
+    # them for its later payload-less turns): the folder must be one of them.
+    assert "cwd" in _SETTING_KEYS
+
+
+def test_an_executing_admission_binds_its_folder_as_session_vars():
+    from gateway.session_api_turn import api_execution, api_session_vars
+
+    token = api_execution.set({"settings": {"cwd": "/w/projects/x", "session_history_delivery": "1"}})
+    try:
+        assert api_session_vars() == {"session_history_delivery": "1", "cwd": "/w/projects/x"}
+    finally:
+        api_execution.reset(token)
+    token = api_execution.set({"settings": {"session_history_delivery": ""}})
+    try:
+        assert api_session_vars()["cwd"] == ""
+    finally:
+        api_execution.reset(token)
+    assert api_session_vars() == {}
+
+
+def test_the_terminal_starts_in_the_folder_and_keeps_a_cd_inside_it():
+    from gateway.session_api_turn import seed_api_terminal_cwd
+    from tools.terminal_tool import clear_session_cwd, get_session_cwd, record_session_cwd
+
+    key = "agent:main:api_server:dia-seed"
+    try:
+        seed_api_terminal_cwd(key, "/w/projects/x")
+        assert get_session_cwd(key) == "/w/projects/x"
+        record_session_cwd(key, "/w/projects/x/src")       # the agent cd'ed inside the project
+        seed_api_terminal_cwd(key, "/w/projects/x")
+        assert get_session_cwd(key) == "/w/projects/x/src"
+        record_session_cwd(key, "/w")                       # left the project: the next turn starts back in it
+        seed_api_terminal_cwd(key, "/w/projects/x")
+        assert get_session_cwd(key) == "/w/projects/x"
+        seed_api_terminal_cwd(key, "")                      # no folder: untouched
+        assert get_session_cwd(key) == "/w/projects/x"
+    finally:
+        clear_session_cwd(key)
+
+
+def test_a_turn_admitted_to_the_authority_carries_its_folder():
+    import asyncio
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from gateway.platforms import api_server_runs
+
+    captured = {}
+
+    async def admit(adapter, **kwargs):
+        captured.update(kwargs)
+        return ("authority", SimpleNamespace(session_id="dia-x"), {"status": "queued"})
+
+    launch = SimpleNamespace(
+        request_profile="", user_message="hi", conversation_history=[], turn_author=None,
+        session_history_delivery=False, walked_from=None, agent_kwargs={"requested_model": "m"},
+        cwd="/w/projects/x", admission=None)
+    adapter = SimpleNamespace(_profile_scope=lambda _profile: nullcontext(), _run_owners={"r1": None})
+    with patch("gateway.session_api_turn.admit_api_turn_async", admit):
+        refused = asyncio.run(api_server_runs._admit_run_to_authority(
+            adapter, launch, "r1", True, False, "scope", None, None))
+    assert refused is None
+    assert captured["cwd"] == "/w/projects/x" and captured["requested_model"] == "m"
+    assert launch.admission[1].session_id == "dia-x"
