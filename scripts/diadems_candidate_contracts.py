@@ -62,6 +62,10 @@ CONTRACTS = (
     'tests/hermes_cli/test_login_backend_provenance.py',
     'tests/agent/test_vault_backend_registry.py',
     'tests/gateway/test_api_server_run_cwd.py',
+    'tests/gateway/test_run_reads_off_loop.py',
+    'tests/test_message_scan_slices.py',
+    'tests/test_session_spillover_cleanup.py',
+    'tests/gateway/test_api_image_delete_scale.py',
 )
 
 
