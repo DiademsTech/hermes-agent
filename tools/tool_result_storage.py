@@ -100,6 +100,27 @@ def spillover_names_in_text(*texts) -> set:
     return names
 
 
+MESSAGE_SCAN_SLICE = 1000
+
+
+def message_id_slices(conn, *, after_id=0, upto=None, size=MESSAGE_SCAN_SLICE):
+    """``(low, high]`` message id ranges covering ``(after_id, upto]``, then every row inserted
+    while the caller read (ids only grow: ``messages.id`` is AUTOINCREMENT). Each range is read
+    by its own statement, so no reader holds the store's lock across the whole table."""
+    low = after_id
+    while True:
+        top = conn.execute('SELECT coalesce(max(id), 0) FROM messages').fetchone()[0]
+        if upto is not None:
+            top = min(top, upto)
+        if top <= low:
+            return
+        while low < top:
+            yield low, min(low + size, top)
+            low = min(low + size, top)
+        if upto is not None:
+            return
+
+
 def referenced_spillover_names(spill_dir) -> set | None:
     """Basenames under *spill_dir* still referenced by any message in the home's ``state.db``.
 
@@ -115,9 +136,16 @@ def referenced_spillover_names(spill_dir) -> set | None:
 
         conn = connect_tracked(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=5.0, tracking_path=db_path)
         try:
-            rows = conn.execute(
-                f"SELECT content, api_content FROM messages WHERE {SPILLOVER_SQL_FILTER} LIMIT 20001"
-            ).fetchall()
+            rows = []
+            # One message id slice per statement: in rollback-journal mode a reader holds the
+            # file's SHARED lock for its whole statement, so a single pass over a large store
+            # (69 s on 13 GB under virtiofs) stalled every gateway write behind it.
+            for low, high in message_id_slices(conn):
+                rows += conn.execute(
+                    f"SELECT content, api_content FROM messages WHERE id>? AND id<=? AND {SPILLOVER_SQL_FILTER}"
+                    " LIMIT 20001", (low, high)).fetchall()
+                if len(rows) > 20000:
+                    break
         finally:
             conn.close()
     except (sqlite3.Error, OSError):
