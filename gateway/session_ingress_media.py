@@ -553,7 +553,7 @@ def collect_unheld_api_images(db):
         return 0
 
 
-def _history_mentions(conn, references, after_id=0):
+def _history_mentions(conn, references, after_id=0, upto=None):
     """Candidate paths any transcript row (id > after_id) mentions raw or JSON-escaped, in ONE
     messages pass. Rows are prefiltered in SQL on the literal text before each candidate's digest
     directory, so only rows that could name a candidate reach Python's exact substring test."""
@@ -569,9 +569,11 @@ def _history_mentions(conn, references, after_id=0):
     # The digests are ONE bound JSON array, never one ``instr`` term each: the statement's size
     # must not grow with the candidate count (SQLite's expression-depth limit fails at ~1000 terms).
     query = ('WITH digests(value) AS MATERIALIZED (SELECT value FROM json_each(?)) SELECT content FROM messages '
-             'WHERE EXISTS (SELECT 1 FROM digests WHERE instr(content, digests.value))' + (' AND id>?' if after_id else ''))
+             'WHERE EXISTS (SELECT 1 FROM digests WHERE instr(content, digests.value))' + (' AND id>?' if after_id else '')
+             + (' AND id<=?' if upto is not None else ''))
     mentioned = set()
-    for (content,) in conn.execute(query, (json.dumps(prefixes), *((after_id,) if after_id else ()))):
+    bounds = (*((after_id,) if after_id else ()), *((upto,) if upto is not None else ()))
+    for (content,) in conn.execute(query, (json.dumps(prefixes), *bounds)):
         text = content.decode('utf-8', 'replace') if isinstance(content, bytes) else str(content)
         mentioned.update(raw for needle, raw in needles.items() if needle in text)
     return mentioned
@@ -595,14 +597,18 @@ def release_unheld_media(db, references, *, retain_history=True):
         return 0
     seen, last_id = set(), 0
     if retain_history:
+        from tools.tool_result_storage import MESSAGE_SCAN_SLICE
         with db._read_ctx() as conn:
-            conn.execute('BEGIN')  # one snapshot: the id watermark and the scan agree
-            try:
-                last_id = conn.execute('SELECT coalesce(max(id), 0) FROM messages').fetchone()[0]
-                seen = _history_mentions(conn, references)
-            finally:
-                if conn.in_transaction:
-                    conn.execute('ROLLBACK')
+            last_id = conn.execute('SELECT coalesce(max(id), 0) FROM messages').fetchone()[0]
+        # The pass is read in id slices, each under the lock for one short statement: a single
+        # pass holds the store's one connection (and, in rollback-journal mode, its file lock)
+        # for the whole table, which froze the gateway for over a minute on a large store. Rows
+        # are not edited after insert and ids only grow, so the slices see what one snapshot
+        # would; a row deleted meanwhile only drops a mention, and newer rows are re-checked
+        # under the write lock below.
+        for low in range(0, last_id, MESSAGE_SCAN_SLICE):
+            with db._read_ctx() as conn:
+                seen |= _history_mentions(conn, references, after_id=low, upto=min(low + MESSAGE_SCAN_SLICE, last_id))
         references = [reference for reference in references if reference['path'] not in seen]
         if not references:
             return 0
