@@ -1,4 +1,6 @@
 """API run controls resolve durable claims, never adapter agent/task ownership."""
+import asyncio
+import contextvars
 from dataclasses import asdict
 
 from gateway.session_contract import SessionActor, SessionRef
@@ -49,7 +51,69 @@ async def continued_session(adapter, session_id, request_id=None):
         return session_id, store_error_response(_openai_error, exc)
 
 
+# A run's state.db reads, done in a worker thread before a handler resolves the run on the loop.
+# The SessionDB has one connection and one lock: a long write (a session delete on a big store)
+# would otherwise freeze the gateway's event loop, every other request and platform with it.
+_READ_AHEAD = contextvars.ContextVar('run_read_ahead', default=None)
+
+
+def _ahead(key):
+    entries = _READ_AHEAD.get()
+    if entries is None or key not in entries:
+        return False, None
+    found = entries[key]
+    if isinstance(found, Exception):
+        raise found
+    return True, found
+
+
+def _read_run(adapter, run_id):
+    entries = {}
+    try:
+        owned = entries[('admission', run_id)] = run_admission(adapter, run_id)
+    except Exception as exc:  # replayed to the caller, as the read on the loop raised it
+        entries[('admission', run_id)] = exc
+        return entries
+    if owned is not None:
+        authority, row = owned
+        try:
+            entries[('result', row['admission_id'])] = admission_result(authority.db, row['admission_id'])
+        except Exception as exc:
+            entries[('result', row['admission_id'])] = exc
+    return entries
+
+
+class _ReadAhead:
+    def __init__(self, entries):
+        self._entries, self._token = entries, None
+
+    def __enter__(self):
+        self._token = _READ_AHEAD.set(self._entries)
+        return self
+
+    def __exit__(self, *exc):
+        _READ_AHEAD.reset(self._token)
+        return False
+
+
+async def read_ahead(adapter, run_id):
+    """``with await read_ahead(adapter, run_id):`` serves this run's admission and result reads
+    from a worker-thread read, so the synchronous resolution inside never waits on the store's
+    lock on the event loop. Scope it to synchronous code: an await inside would keep a stale read."""
+    if _authority(adapter) is None:
+        return _ReadAhead({})
+    return _ReadAhead(await asyncio.to_thread(_read_run, adapter, run_id))
+
+
+async def run_projection_off_loop(adapter, run_id):
+    with await read_ahead(adapter, run_id):
+        return run_projection(adapter, run_id)
+
+
 def run_admission(adapter, run_id):
+    hit, found = _ahead(('admission', run_id))
+    if hit:
+        return found
     authority = _authority(adapter)
     if authority is None:
         return None
@@ -73,7 +137,9 @@ def run_projection(adapter, run_id):
     # ``unknown`` is not terminal: later turns wait for POST /v1/runs/{id}/resolve-unknown, and
     # ``interrupted`` is in TERMINAL_STATUSES, so a poller would stop at a paused head.
     status = {'queued': 'queued', 'started': 'running', 'unknown': 'unknown', 'terminal': row['outcome']}.get(row['status'])
-    saved = admission_result(authority.db, row['admission_id'])
+    hit, saved = _ahead(('result', row['admission_id']))
+    if not hit:
+        saved = admission_result(authority.db, row['admission_id'])
     result = saved.get('result', {}) if saved else {}
     if row['status'] == 'terminal':
         if row['outcome'] == 'steering':
@@ -117,7 +183,7 @@ async def send_clarify(adapter, *, chat_id, **kwargs):
 
 async def respond_run(adapter, run_id, body, *, kind):
     import uuid
-    owned = run_admission(adapter, run_id)
+    owned = await asyncio.to_thread(run_admission, adapter, run_id)
     if owned is None:
         raise RuntimeStoreError('not_found')
     authority, row = owned
@@ -141,7 +207,7 @@ async def respond_run(adapter, run_id, body, *, kind):
 
 
 async def stop_run(adapter, run_id):
-    owned = run_admission(adapter, run_id)
+    owned = await asyncio.to_thread(run_admission, adapter, run_id)
     if owned is None:
         raise RuntimeStoreError('not_found')
     authority, row = owned
@@ -156,25 +222,25 @@ async def stop_run(adapter, run_id):
             # executing now, so Stop that exact claim below instead of refusing a live run.
             if exc.reason != 'stale_generation':
                 raise
-            authority, row = run_admission(adapter, run_id)
+            authority, row = await asyncio.to_thread(run_admission, adapter, run_id)
         else:
             adapter._stopping_run_ids.add(run_id)
             waiter = authority.waiters.pop(row['admission_id'], None)
             if waiter is not None and not waiter.done():
                 waiter.set_result(None)
-            return run_projection(adapter, run_id)
+            return await run_projection_off_loop(adapter, run_id)
     if row['status'] == 'started':
         await authority.interrupt(actor, ref, row['generation'])
         adapter._stopping_run_ids.add(run_id)
         return {'run_id': run_id, 'status': 'stopping', 'admission_id': row['admission_id']}
     elif row['status'] == 'unknown':
         raise RuntimeStoreError('unknown_execution')
-    return run_projection(adapter, run_id)
+    return await run_projection_off_loop(adapter, run_id)
 
 
 async def resolve_unknown_run(adapter, run_id, body):
     """Resolve only the exact unknown admission durably bound to an owned API run."""
-    owned = run_admission(adapter, run_id)
+    owned = await asyncio.to_thread(run_admission, adapter, run_id)
     if owned is None:
         raise RuntimeStoreError('not_found')
     authority, row = owned
