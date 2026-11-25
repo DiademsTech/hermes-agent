@@ -66,6 +66,7 @@ CONTRACTS = (
     'tests/test_message_scan_slices.py',
     'tests/test_session_spillover_cleanup.py',
     'tests/gateway/test_api_image_delete_scale.py',
+    'tests/agent/test_prompt_guidance_config.py',
 )
 
 

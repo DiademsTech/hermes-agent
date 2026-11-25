@@ -1303,9 +1303,11 @@ def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict
 def _render_skills_index(
     skills_by_category: dict[str, list[tuple[str, str]]],
     compact_categories: frozenset[str] | None, available_tools: set[str] | None, unloadable: list[str] = (),
+    guidance: str = "",
 ) -> str:
     """Render the ## Skills block; "" when there is nothing to list. *unloadable* names (different skills
-    sharing a name AND relative path within one tier — one root or several) get a rename note instead of a row skill_view would refuse."""
+    sharing a name AND relative path within one tier — one root or several) get a rename note instead of a row skill_view would refuse.
+    *guidance* (``skills.index_guidance``) replaces the built-in text around the index."""
     if not skills_by_category:
         return ""
     # Demoted categories collapse to one names-only line. NEVER drop entries — agent-created skills are the
@@ -1344,6 +1346,12 @@ def _render_skills_index(
             + "\n<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
             + hidden_note
         )
+    if guidance:
+        return (
+            "## Skills\n" + guidance + "\n\n"
+            "<available_skills>\n" + "\n".join(index_lines) + "\n</available_skills>"
+            + hidden_note
+        )
     return (
         "## Skills\n"
         "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
@@ -1367,6 +1375,13 @@ def _render_skills_index(
     )
 
 
+def _skills_index_guidance() -> str:
+    """``skills.index_guidance`` from config.yaml, stripped; "" (built-in text) when unset or not a string."""
+    from agent.skill_utils import _skills_cfg_get
+    value = _skills_cfg_get("index_guidance")
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _oneshot_prompt_variant() -> bool:
     from agent.oneshot_footprint import is_single_query_session
     return is_single_query_session()
@@ -1388,8 +1403,9 @@ def _build_skills_system_prompt_inner(
     manifest = _build_skills_manifest(skills_dir)
     files = frozenset((rel, *sig) for rel, sig in manifest.items())
     files |= {(str(d), rel, *sig) for _, d in extra_roots for rel, sig in _build_skills_manifest(d).items()}
+    guidance = _skills_index_guidance()
     cache_key = (
-        str(skills_dir), tuple((t, str(d)) for t, d in extra_roots), files,
+        str(skills_dir), tuple((t, str(d)) for t, d in extra_roots), files, guidance,
         tuple(sorted(str(t) for t in (available_tools or set()))),
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
@@ -1458,7 +1474,7 @@ def _build_skills_system_prompt_inner(
             logger.debug("Could not write skills prompt snapshot: %s", e)
 
     unloadable = sorted({e["name"] for e in visible_entries if not e["load_name"]})
-    result = _render_skills_index(skills_by_category, compact_categories, available_tools, unloadable)
+    result = _render_skills_index(skills_by_category, compact_categories, available_tools, unloadable, guidance)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)

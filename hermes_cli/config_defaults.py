@@ -171,6 +171,9 @@ DEFAULT_CONFIG = {
         # "Finish the job" prompt block for all models: don't stop at a stub, never fabricate output
         # when the real path is blocked. ~80 cached tokens. False disables.
         "task_completion_guidance": True,
+        # The "help with Hermes Agent itself" pointer (docs URL, hermes-agent skill), in every
+        # prompt. False drops it, for managed hosts whose users never configure the agent.
+        "hermes_help_guidance": True,
         # Prompt block for all models steering independent tool calls (reads, searches, fetches,
         # read-only commands) into one batched turn; the runtime already runs them concurrently. ~70
         # cached tokens. False disables.
@@ -1411,6 +1414,9 @@ DEFAULT_CONFIG = {
         # Resolved once when the agent's prompt is first built; missing/disabled names warn and
         # skip; HERMES_IGNORE_RULES suppresses the list like the other auto-injected context.
         "auto_load": [],
+        # Text that replaces the guidance printed above the skills index (scan the skills, when to
+        # load one, when to save one). Empty = the built-in guidance.
+        "index_guidance": "",
         # Substitute ${HERMES_SKILL_DIR} / ${HERMES_SESSION_ID} in SKILL.md content.
         "template_vars": True,
         # Pre-execute !`cmd` snippets in SKILL.md, inlining stdout (dates, git state...). Off:
